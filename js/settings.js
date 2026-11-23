@@ -30,7 +30,8 @@ export const settings = {
   gLast: null,
   // Gemini (IA): la clave se guarda solo en esta tablet
   aiKey: '',
-  aiModel: ''
+  aiModel: '',
+  pin: ''          // huella SHA-256 del PIN (vacío = sin bloqueo)
 };
 
 export const PAPER = { eink: '#f4f3ee', white: '#ffffff', cream: '#f7f1e3' };

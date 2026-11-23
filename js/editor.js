@@ -12,7 +12,16 @@ import * as AI from './ai.js';
 import * as RT from './richtext.js';
 import * as FD from './folders.js';
 
-let CLIP = null; // portapapeles compartido entre cuadernos
+let CLIP = null;
+// Reduce una imagen (dataURL) para guardarla como miniatura.
+async function shrink(src, max = 520) {
+  const im = await ink.loadImage(src);
+  if (!im) return src;
+  const k = Math.min(1, max / Math.max(im.naturalWidth, im.naturalHeight));
+  const c = document.createElement('canvas'); c.width = Math.round(im.naturalWidth * k); c.height = Math.round(im.naturalHeight * k);
+  const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(im, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.8);
+} // portapapeles compartido entre cuadernos
 const GRAYS = ['#141414', '#4a4a4a', '#7a7a7a', '#a8a8a8', '#ffffff'];
 const COLORS = ['#c62828', '#1565c0', '#2e7d32', '#ef6c00', '#6a1b9a'];
 const HL_GRAYS = ['#9a9a9a', '#c4c4c4'];
@@ -208,6 +217,7 @@ export class Editor {
   }
 
   async renderBg() {
+    if (!this.page) return;
     const tok = this.bgTok = (this.bgTok || 0) + 1;
     const off = document.createElement('canvas');
     off.width = this.cBg.width; off.height = this.cBg.height;
@@ -218,9 +228,16 @@ export class Editor {
   }
 
   renderInk() {
+    if (!this.page) return;
     const x = this.xInk;
     x.clearRect(0, 0, W, H);
     for (const L of this.page.layers) if (L.vis) for (const o of L.objs) ink.drawObj(x, o, () => this.reqInk());
+    // Marcas de índice y destacados en el margen
+    for (const m of this.page.marks || []) {
+      x.save(); x.fillStyle = '#141414'; x.font = '600 34px Inter, sans-serif'; x.textBaseline = 'middle';
+      x.fillText(m.type === 'star' ? '★' : '§', Math.max(6, m.box.x - 44), m.box.y + Math.min(30, m.box.h / 2));
+      x.restore();
+    }
   }
   reqInk() { if (this.rafInk) return; this.rafInk = requestAnimationFrame(() => { this.rafInk = 0; this.renderInk(); }); }
   reqLive() { if (this.raf) return; this.raf = requestAnimationFrame(() => { this.raf = 0; this.paintLive(); }); }
@@ -365,6 +382,10 @@ export class Editor {
     try { p.thumb = this.thumb(); } catch (e) { /* lienzo aún vacío */ }
     await db.put('pages', p);
     this.nb.updated = p.updated;
+    // Texto de la página para el buscador: lo tecleado + lo reconocido de la escritura (si se pidió).
+    const typed = p.layers.flatMap(L => L.objs).filter(o => o.t === 'x').map(o => o.text || RT.plain(o)).join(' ');
+    this.nb.txt = { ...(this.nb.txt || {}), [p.id]: (typed + ' ' + (p.ocr || '') + ' ' + (p.marks || []).map(m => m.label || '').join(' ')).trim() };
+    this.nb.marks = (this.nb.marks || []).filter(m => m.pid !== p.id).concat((p.marks || []).map(m => ({ ...m, pid: p.id })));
     if (this.idx === 0 || !this.nb.cover) this.nb.cover = p.thumb;
     await db.put('notebooks', this.nb);
   }
@@ -466,7 +487,7 @@ export class Editor {
       case 'pen0': case 'pen1': case 'hl': {
         const cfg = tool === 'hl' ? settings.hl : settings.pens[+tool.slice(3)];
         const s = { t: 's', b: tool === 'hl' ? 'marca' : cfg.b, w: cfg.w, c: cfg.c, pts: [p.x, p.y, p.p] };
-        this.act = { id, touch, kind: 'draw', s, t0: performance.now() };
+        this.act = { id, touch, kind: 'draw', s, t0: performance.now(), wall: Date.now() };
         this.armHold(p);
         this.reqLive();
         break;
@@ -549,6 +570,7 @@ export class Editor {
     switch (a.kind) {
       case 'draw':
         this.snap();
+        if (this.mr && this.recId) { a.s.ar = this.recId; a.s.at = Math.max(0, a.wall - this.recT0); }
         this.layer().objs.push(a.s);
         ink.drawObj(this.xInk, a.s);
         this.dirty();
@@ -619,7 +641,8 @@ export class Editor {
       <button data-s="ocr">${icon('spark')}A texto</button><button data-s="copy">${icon('copy')}Copiar</button><button data-s="cut">${icon('cut')}Cortar</button>
       <button data-s="dup">${icon('dup')}Duplicar</button><button data-s="del">${icon('trash')}Borrar</button>
       <button data-s="layer">${icon('moveLayer')}Capa</button><button data-s="event">${icon('event')}Evento</button>
-      <button data-s="todo">${icon('task')}Tarea</button><button data-s="pick">${icon('picking')}Recorte</button></div>`);
+      <button data-s="todo">${icon('task')}Tarea</button><button data-s="head">${icon('listN')}Índice</button><button data-s="star">${icon('star')}Destacar</button>
+      ${this.sel.objs.some(o => o.ar) ? `<button data-s="listen">${icon('headphones')}Escuchar</button>` : ''}<button data-s="pick">${icon('picking')}Recorte</button></div>`);
     this.ovl.append(bar);
     const bw = bar.offsetWidth, sw = W * z;
     let top = b.y * z - bar.offsetHeight - 10;
@@ -690,12 +713,31 @@ export class Editor {
           { name: 'title', label: 'Título (opcional, se guarda también tu letra)', value: '' }
         ], 'Crear');
         if (!r || !r.date) return;
-        if (a === 'event') await db.put('events', { id: uid(), date: r.date, time: r.time || '', title: r.title, img: img.src });
-        else await db.put('todos', { id: uid(), date: r.date, text: r.title, img: img.src, done: false });
+        const src = { nb: this.nb.id, pid: this.page.id };
+        if (a === 'event') await db.put('events', { id: uid(), date: r.date, time: r.time || '', title: r.title, img: img.src, src });
+        else await db.put('todos', { id: uid(), date: r.date, text: r.title, img: img.src, done: false, src });
         toast(a === 'event' ? 'Evento añadido a la Agenda' : 'Tarea añadida a la Agenda');
         break;
       }
       case 'pick': await store.newPicking(this.selImage()); toast('Guardado en Recortes'); break;
+      case 'head': case 'star': {
+        const b = ink.unionBox(objs), img = this.selImage();
+        let label = '';
+        if (a === 'head') {
+          const r = await prompt('Añadir al índice', [{ name: 't', label: 'Título de la sección (opcional; se guarda también tu letra)', value: '' }], 'Añadir');
+          if (!r) return;
+          label = r.t.trim();
+        }
+        this.page.marks = [...(this.page.marks || []), { id: uid(), type: a, label, box: b, img: await shrink(img.src) }];
+        this.renderInk(); this.dirty();
+        toast(a === 'head' ? 'Añadido al índice del cuaderno' : 'Destacado ★ (lo verás en Inicio)');
+        break;
+      }
+      case 'listen': {
+        const first = objs.filter(o => o.ar).sort((x, y) => x.at - y.at)[0];
+        this.playAt(first.ar, first.at);
+        break;
+      }
       case 'ocr': {
         if (!this.aiReady()) return;
         const b = ink.unionBox(objs), img = this.selImage();
@@ -746,7 +788,8 @@ export class Editor {
       { icon: 'event', label: 'Sacar citas y tareas a la Agenda', run: () => this.aiExtract() },
       { icon: 'search', label: 'Preguntar a este cuaderno', run: () => this.aiAsk() },
       { icon: 'share', label: 'Traducir esta página', run: () => this.aiTranslate() },
-      this.nb.kind === 'meeting' && { icon: 'headphones', label: 'Resumir una grabación', run: () => this.aiMeeting() }
+      (this.nb.recs || []).length && { icon: 'headphones', label: 'Resumir una grabación', run: () => this.aiMeeting() },
+      { icon: 'search', label: 'Reconocer la escritura para el buscador', run: () => this.aiIndex() }
     ], { side: this.side() });
   }
 
@@ -790,6 +833,30 @@ export class Editor {
       n++;
     }
     toast(`${n} elementos añadidos a la Agenda`);
+  }
+
+  // Pasa a texto la letra de cada página (con Gemini) para poder buscarla desde Cuadernos.
+  async aiIndex() {
+    await this.flushSave();
+    const t = toast('Reconociendo la escritura…', 600000);
+    let n = 0;
+    try {
+      for (let i = 0; i < this.nb.pages.length; i++) {
+        const id = this.nb.pages[i], p = id === this.page.id ? this.page : await db.get('pages', id);
+        if (!p || (p.ocrAt && p.ocrAt >= p.updated)) continue;
+        if (!p.layers.some(L => L.objs.some(o => o.t === 's'))) continue;
+        t.textContent = `Reconociendo la escritura… página ${i + 1} de ${this.nb.pages.length}`;
+        const txt = await AI.ask([{ text: AI.P.ocr }, AI.canvasPart(await pageCanvas(p, this.nb, 0.75), 0.72)]);
+        p.ocr = txt === '(sin texto)' ? '' : txt; p.ocrAt = Date.now() + 1;
+        await db.put('pages', p);
+        const typed = p.layers.flatMap(L => L.objs).filter(o => o.t === 'x').map(o => o.text || RT.plain(o)).join(' ');
+        this.nb.txt = { ...(this.nb.txt || {}), [p.id]: (typed + ' ' + p.ocr).trim() };
+        await db.put('notebooks', this.nb);
+        n++;
+      }
+      toast(n ? `Listo: ${n} páginas reconocidas. Ya puedes buscarlas desde Cuadernos.` : 'Ya estaba todo reconocido.', 4000);
+    } catch (e) { toast(e.message || 'No se pudo reconocer la escritura', 6000); }
+    finally { t.remove(); }
   }
 
   async aiAsk() {
@@ -898,6 +965,7 @@ export class Editor {
       <button data-c="hilite" title="Resaltar"><span style="background:#ffe066;padding:0 3px">ab</span> ▾</button><span class="sep"></span>
       <button data-c="justifyLeft" title="Alinear a la izquierda">${icon('alignL')}</button><button data-c="justifyCenter" title="Centrar">${icon('alignC')}</button><button data-c="justifyRight" title="Alinear a la derecha">${icon('alignR')}</button>
       <button data-c="insertUnorderedList" title="Lista con viñetas">${icon('listB')}</button><button data-c="insertOrderedList" title="Lista numerada">${icon('listN')}</button><span class="sep"></span>
+      <button data-c="dictate" title="Dictar por voz">${icon('mic')}Dictar</button>
       <button data-c="clear" title="Quitar formato">${icon('x')}Formato</button>
       <button class="ok" data-c="done" title="Terminar">${icon('check')} Hecho</button></div>`);
     this.q('.ed-main').append(bar);
@@ -941,7 +1009,9 @@ export class Editor {
       place();
     };
     document.addEventListener('selectionchange', upd);
-    bar.cleanup = () => { document.removeEventListener('selectionchange', upd); bar.remove(); };
+    let recog = null;
+    const stopDict = () => { if (recog) { try { recog.stop(); } catch (e) {} recog = null; } bar.querySelector('[data-c=dictate]')?.classList.remove('on'); };
+    bar.cleanup = () => { stopDict(); document.removeEventListener('selectionchange', upd); bar.remove(); };
     const swatches = (list, run, extra) => {
       const el = h(`<div class="penpop"><div class="row">${list.map(c => `<button class="sw" data-v="${c}" style="background:${c}"></button>`).join('')}</div>${extra || ''}</div>`);
       el.addEventListener('pointerdown', e => e.preventDefault());
@@ -968,6 +1038,22 @@ export class Editor {
           break;
         }
         case 'clear': document.execCommand('removeFormat'); break;
+        case 'dictate': {
+          if (recog) { stopDict(); return; }
+          const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+          if (!SR) { toast('Este navegador no permite dictar. Usa el micrófono del teclado de la tablet.'); return; }
+          recog = new SR();
+          recog.lang = 'es-ES'; recog.continuous = true; recog.interimResults = false;
+          recog.onresult = ev => {
+            for (let i = ev.resultIndex; i < ev.results.length; i++) if (ev.results[i].isFinal) {
+              ensure(); document.execCommand('insertText', false, ev.results[i][0].transcript.trim() + ' '); place();
+            }
+          };
+          recog.onerror = ev => { if (ev.error !== 'no-speech') toast('Dictado: ' + (ev.error === 'not-allowed' ? 'permiso de micrófono denegado' : ev.error)); stopDict(); };
+          recog.onend = () => { if (recog) { try { recog.start(); } catch (e) { stopDict(); } } };
+          try { recog.start(); b.classList.add('on'); toast('Habla: lo que digas se escribe aquí'); } catch (e) { stopDict(); }
+          return;
+        }
         case 'font': {
           const el = h(`<div class="menu">${Object.entries(RT.FAM_NAMES).map(([k, n]) => `<button data-f="${k}" style="font-family:${RT.FAM[k].replace(/"/g, "'")};font-size:18px">${n}</button>`).join('')}</div>`);
           el.addEventListener('pointerdown', ev => ev.preventDefault());
@@ -1032,6 +1118,7 @@ export class Editor {
         break;
       }
       case 'rec': this.toggleRec(btn); break;
+      case 'marks': this.marksView(); break;
       case 'recs': this.recsPop(btn); break;
     }
   }
@@ -1236,12 +1323,9 @@ export class Editor {
   // ---------------- reuniones: grabación de voz ----------------
   setupExtra() {
     const ex = this.q('.extra');
-    if (this.nb.kind === 'meeting') {
-      ex.innerHTML = `<button class="btn sm rec" data-a="rec">${icon('rec')} Grabar</button><span class="rt sub"></span>
-        <button class="btn sm ghost" data-a="recs">${icon('headphones')} <span class="rc">${(this.nb.recs || []).length}</span></button>`;
-    } else if (this.nb.kind === 'book') {
-      ex.innerHTML = `<span class="sub">Libro · escribe encima con el lápiz</span>`;
-    }
+    ex.innerHTML = `<button class="btn sm ghost" data-a="marks" title="Índice y destacados">${icon('listN')} Índice</button>
+      <button class="btn sm rec" data-a="rec" title="Grabar audio mientras escribes">${icon('rec')} Grabar</button><span class="rt sub"></span>
+      <button class="btn sm ghost" data-a="recs" title="Grabaciones">${icon('headphones')} <span class="rc">${(this.nb.recs || []).length}</span></button>`;
   }
 
   async toggleRec(btn) {
@@ -1249,14 +1333,14 @@ export class Editor {
     let stream;
     try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
     catch (e) { return toast('No se pudo usar el micrófono. Revisa el permiso del navegador.'); }
-    const chunks = [], mr = new MediaRecorder(stream), t0 = Date.now(), nb = this.nb, page = this.idx;
-    this.mr = mr;
+    const chunks = [], mr = new MediaRecorder(stream), t0 = Date.now(), nb = this.nb, page = this.idx, id = uid();
+    this.mr = mr; this.recId = id; this.recT0 = t0;
     mr.ondataavailable = e => e.data.size && chunks.push(e.data);
     mr.onstop = async () => {
       stream.getTracks().forEach(t => t.stop());
       clearInterval(this.recT); this.mr = null;
       const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
-      const id = uid();
+      this.recId = null;
       await db.put('blobs', { id, kind: 'audio', nb: nb.id, data: blob, created: t0, dur: Date.now() - t0, page });
       (nb.recs = nb.recs || []).push(id);
       await db.put('notebooks', nb);
@@ -1269,6 +1353,38 @@ export class Editor {
     mr.start(1000);
     btn.innerHTML = `${icon('stop')} Parar`; btn.classList.add('pri');
     this.recT = setInterval(() => { this.q('.rt').textContent = '● ' + fmtDur(Date.now() - t0); }, 500);
+  }
+
+  async playAt(recId, ms) {
+    const r = await db.get('blobs', recId);
+    if (!r) return toast('La grabación ya no está disponible');
+    const au = h('<audio controls style="width:100%"></audio>');
+    au.src = URL.createObjectURL(r.data);
+    au.addEventListener('loadedmetadata', () => { au.currentTime = Math.max(0, ms / 1000 - 2); au.play().catch(() => {}); }, { once: true });
+    modal('Lo que se decía mientras escribías', au, [{ label: 'Cerrar', value: null }]).then(() => { au.pause(); URL.revokeObjectURL(au.src); });
+  }
+
+  async marksView() {
+    await this.flushSave();
+    const nb = this.nb, ids = nb.pages;
+    const marks = (nb.marks || []).filter(m => ids.includes(m.pid)).map(m => ({ ...m, pi: ids.indexOf(m.pid) })).sort((a, b) => a.pi - b.pi || a.box.y - b.box.y);
+    const row = m => `<div class="li mk" data-pid="${m.pid}" data-mid="${m.id}"><b class="pn">p. ${m.pi + 1}</b>${m.label ? `<span class="tx">${esc(m.label)}</span>` : ''}<img src="${m.img}" alt=""><div class="grow"></div><button class="ib del" title="Quitar">${icon('trash')}</button></div>`;
+    const heads = marks.filter(m => m.type === 'head'), stars = marks.filter(m => m.type === 'star');
+    const el = h(`<div><h3 class="row">${icon('listN')} Índice</h3><div class="list">${heads.map(row).join('') || '<div class="li sub">Rodea un título con el lazo y pulsa «Índice».</div>'}</div>
+      <h3 class="row">${icon('star')} Destacados</h3><div class="list">${stars.map(row).join('') || '<div class="li sub">Rodea algo importante con el lazo y pulsa «Destacar».</div>'}</div></div>`);
+    let close;
+    el.addEventListener('click', async e => {
+      const r = e.target.closest('[data-mid]'); if (!r) return;
+      if (e.target.closest('.del')) {
+        const p = r.dataset.pid === this.page.id ? this.page : await db.get('pages', r.dataset.pid);
+        p.marks = (p.marks || []).filter(m => m.id !== r.dataset.mid);
+        nb.marks = (nb.marks || []).filter(m => m.id !== r.dataset.mid);
+        if (p === this.page) { this.renderInk(); await this.save(); } else { await db.put('pages', p); await db.put('notebooks', nb); }
+        r.remove(); return;
+      }
+      close(); this.loadPage(ids.indexOf(r.dataset.pid));
+    });
+    modal('Índice · ' + nb.title, el, [{ label: 'Cerrar', value: null }], { wide: true, mount: c => { close = c; } });
   }
 
   async recsPop(btn) {

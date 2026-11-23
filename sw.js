@@ -1,6 +1,6 @@
 // Service worker: la app funciona sin conexión una vez abierta la primera vez.
 // Con internet siempre carga la última versión publicada; sin internet usa la copia guardada.
-const V = 'cuaderno-v10';
+const V = 'cuaderno-v11';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/db.js', 'js/ui.js', 'js/icons.js', 'js/settings.js', 'js/store.js',

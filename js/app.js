@@ -41,6 +41,13 @@ const main = document.getElementById('main'), edroot = document.getElementById('
 // ---------------- botones inferiores (como los de la tableta) ----------------
 const bez = app.querySelector('.bezel');
 let lpT = null, lpFired = false;
+let swipe0 = null;
+bez.addEventListener('pointerdown', e => { swipe0 = { x: e.clientX, t: Date.now() }; });
+bez.addEventListener('pointerup', e => {
+  if (!swipe0) return;
+  const dx = e.clientX - swipe0.x; swipe0 = null;
+  if (Math.abs(dx) > 70 && editor) { lpFired = true; clearTimeout(lpT); editor.go(dx < 0 ? 1 : -1); setTimeout(() => { lpFired = false; }, 50); }
+});
 bez.addEventListener('pointerdown', e => {
   const b = e.target.closest('[data-b=home]'); if (!b) return;
   lpFired = false;
@@ -50,6 +57,7 @@ bez.addEventListener('pointerup', () => clearTimeout(lpT));
 bez.addEventListener('pointerleave', () => clearTimeout(lpT));
 bez.addEventListener('click', async e => {
   const b = e.target.closest('[data-b]'); if (!b) return;
+  if (lpFired && b.dataset.b !== 'home') return;
   if (b.dataset.b === 'back') history.length > 1 ? history.back() : go('#/home');
   if (b.dataset.b === 'home' && !lpFired) go('#/home');
   if (b.dataset.b === 'memo') quickMemo();
@@ -215,6 +223,7 @@ VIEWS.home = async v => {
   const tds = (await db.all('todos')).filter(t => t.date === today || (!t.done && t.date < today));
   const ext = settings.gCalShow ? sync.extOn(await sync.externalEvents(), today) : [];
   const count = k => nbs.filter(n => n.kind === k).length;
+  const stars = nbs.flatMap(n => (n.marks || []).filter(m => m.type === 'star' && n.pages.includes(m.pid)).map(m => ({ ...m, nb: n, pi: n.pages.indexOf(m.pid) }))).slice(-8).reverse();
   const tiles = [
     ['papel', 'notebook', 'Cuadernos', `${count('paper')} cuadernos`],
     ['agenda', 'calendar', 'Agenda', `${evs.length + ext.length} eventos hoy`],
@@ -233,9 +242,11 @@ VIEWS.home = async v => {
         ${ext.map(extRow).join('')}
         ${tds.map(t => `<div class="li ${t.done ? 'done' : ''}" data-td="${t.id}"><button class="chk">${t.done ? icon('check') : ''}</button><span class="tx">${esc(t.text || '')}</span>${t.img ? `<img src="${t.img}" alt="">` : ''}${t.date < today ? '<span class="sub">atrasada</span>' : ''}</div>`).join('')}
         ${!evs.length && !tds.length && !ext.length ? '<div class="li sub">Sin eventos ni tareas para hoy.</div>' : ''}
-      </div><a class="btn sm ghost" href="#/agenda" style="margin-top:12px">${icon('calendar')} Abrir agenda</a></section>
+      </div><a class="btn sm ghost" href="#/agenda" style="margin-top:12px">${icon('calendar')} Abrir agenda</a>
+      ${stars.length ? `<h2>${icon('star', 'inl')} Destacados</h2><div class="list stars">${stars.map(m => `<div class="li mk" data-nb="${m.nb.id}" data-pi="${m.pi}"><img src="${m.img}" alt=""><div class="tx"><b>${esc(m.label || m.nb.title)}</b><br><span class="sub">${esc(m.nb.title)} · p. ${m.pi + 1}</span></div></div>`).join('')}</div>` : ''}</section>
     </div>`;
   bindCovers(v.querySelector('.rc') || h('<div></div>'), recent, () => route());
+  v.querySelectorAll('.stars [data-nb]').forEach(r => r.onclick = () => go(`#/ed/${r.dataset.nb}/${r.dataset.pi}`));
   v.querySelectorAll('[data-td] .chk').forEach(b => b.onclick = async () => {
     const t = tds.find(x => x.id === b.closest('[data-td]').dataset.td); t.done = !t.done; await db.put('todos', t); route();
   });
@@ -263,7 +274,16 @@ VIEWS.papel = async (v, cur = '') => {
   // En la raíz se ven los cuadernos; en cada carpeta, todo lo que se haya movido a ella.
   const here = d => (d.parent || '') === cur && (cur || d.kind === 'paper');
   let subf = q ? folders.filter(f => f.title.toLowerCase().includes(q)) : FD.childrenOf(cur, folders);
-  let list = docs.filter(d => (q ? (d.kind === 'paper' || d.parent) && d.title.toLowerCase().includes(q) : here(d)) && (!F.tag || (d.tags || []).includes(F.tag)));
+  const hit = d => d.title.toLowerCase().includes(q) || Object.values(d.txt || {}).some(t => t.toLowerCase().includes(q));
+  const snippet = d => {
+    if (d.title.toLowerCase().includes(q)) return '';
+    for (const [pid, t] of Object.entries(d.txt || {})) {
+      const i = t.toLowerCase().indexOf(q);
+      if (i >= 0) return `«…${t.slice(Math.max(0, i - 20), i + q.length + 25).replace(/\s+/g, ' ')}…» · p. ${d.pages.indexOf(pid) + 1}`;
+    }
+    return '';
+  };
+  let list = docs.filter(d => (q ? hit(d) : here(d)) && (!F.tag || (d.tags || []).includes(F.tag)));
   list.sort(sorter);
   if (F.sort !== 'name') subf = [...subf].sort(sorter);
   const where = d => { const p = FD.pathOf(d.parent || '', folders); return p.length ? p.map(f => f.title).join(' › ') : 'Raíz'; };
@@ -281,7 +301,7 @@ VIEWS.papel = async (v, cur = '') => {
       ${tree('', 1)}<button class="btn sm ghost tnew">${icon('folderPlus')} Nueva carpeta</button></aside>
     <section class="fmain">
       <div class="row head"><h1>${cur ? esc(path[path.length - 1].title) : 'Cuadernos'}</h1><div class="grow"></div>
-        <label class="search">${icon('search')}<input placeholder="Buscar en todas las carpetas" value="${esc(F.q)}"></label>
+        <label class="search">${icon('search')}<input placeholder="Buscar (también lo escrito)" value="${esc(F.q)}"></label>
         <div class="seg sort"><button data-s="updated">Recientes</button><button data-s="created">Creación</button><button data-s="name">A–Z</button></div></div>
       <div class="row crumbs"><a href="#/papel" class="${!cur ? 'on' : ''}">${icon('home', 'inl')} Raíz</a>${path.map(f => `<span>›</span><a href="#/papel/${f.id}" class="${f.id === cur ? 'on' : ''}">${esc(f.title)}</a>`).join('')}
         ${cur ? `<button class="ib cmore" title="Opciones de la carpeta">${icon('more')}</button>` : ''}<div class="grow"></div>
@@ -289,7 +309,7 @@ VIEWS.papel = async (v, cur = '') => {
       ${tags.length ? `<div class="row chips">${icon('tag')}<button class="chip ${!F.tag ? 'on' : ''}" data-g="">Todas</button>${tags.map(t => `<button class="chip ${F.tag === t ? 'on' : ''}" data-g="${esc(t)}">${esc(t)}</button>`).join('')}</div>` : ''}
       ${q ? `<p class="sub">Resultados para «${esc(F.q)}» en todas las carpetas</p>` : ''}
       ${subf.length ? `<div class="fcards">${subf.map(f => `<div class="fcard" data-folder="${f.id}">${icon('folder')}<div class="ft"><b>${esc(f.title)}</b><span class="sub">${q ? esc(where(f)) : count(f.id) + ' elementos'}</span></div><button class="ib" data-fmore="${f.id}" title="Opciones">${icon('more')}</button></div>`).join('')}</div>` : ''}
-      ${list.length ? `<div class="covers">${list.map(n => cover(n, q ? where(n) : `${n.kind === 'paper' ? n.pages.length + ' pág.' : KIND_NAME[n.kind]} · ${fmtDate(n.updated)}`)).join('')}</div>`
+      ${list.length ? `<div class="covers">${list.map(n => cover(n, q ? (snippet(n) || where(n)) : `${n.kind === 'paper' ? n.pages.length + ' pág.' : KIND_NAME[n.kind]} · ${fmtDate(n.updated)}`)).join('')}</div>`
         : !subf.length ? empty(q ? 'search' : 'folder', q ? 'Nada coincide' : cur ? 'Carpeta vacía' : 'Aún no tienes cuadernos', q ? 'Prueba con otra palabra.' : 'Crea un cuaderno o una carpeta, o mueve aquí cualquier documento con su menú ⋯ → «Mover a carpeta».') : ''}
     </section></div>`;
 
@@ -358,86 +378,207 @@ async function newNotebookDialog(parent = '') {
   openNb(nb);
 }
 
-// ---- Agenda ----
-let calM = null, calSel = null;
+// ---- Agenda: vistas Día · Semana · Mes (al estilo Google Calendar) ----
+const CAL = { view: 'month', sel: null };
+const HOUR = 48;
+const addD = (k, n) => { const d = fromKey(k); d.setDate(d.getDate() + n); return dkey(d); };
+const weekStart = k => { const d = fromKey(k); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return dkey(d); };
+const toMin = t => { const [hh, mm] = String(t || '0:0').split(':').map(Number); return (hh || 0) * 60 + (mm || 0); };
+const fromMin = m => `${pad(Math.floor(m / 60) % 24)}:${pad(m % 60)}`;
+
+async function agendaData() {
+  return {
+    events: await db.all('events'),
+    todos: await db.all('todos'),
+    dailies: (await db.all('notebooks')).filter(n => n.kind === 'daily'),
+    ext: settings.gCalShow && G.granted('calRead') ? await sync.externalEvents() : []
+  };
+}
+
+// Todo lo que hay en un día: eventos, tus otros calendarios, tareas y la página escrita.
+function itemsOn(D, k) {
+  const out = [];
+  for (const e of D.events) if (e.date === k) out.push({ kind: 'ev', title: e.title || (e.img ? 'Evento escrito a mano' : 'Evento'), time: e.time, end: e.time ? fromMin(Math.min(1439, toMin(e.time) + (e.dur || 60))) : '', color: '#141414', ref: e });
+  for (const e of sync.extOn(D.ext, k)) out.push({ kind: 'ext', title: e.title, time: e.time, end: e.endTime, color: e.color, ref: e });
+  for (const t of D.todos) if (t.date === k) out.push({ kind: 'todo', title: t.text || 'Tarea escrita a mano', done: t.done, color: '#141414', ref: t });
+  const p = D.dailies.find(d => d.date === k);
+  if (p) out.push({ kind: 'page', title: 'Página del día', color: '#7a7a7a', ref: p });
+  const key = i => (i.time ? '1' + i.time : i.kind === 'page' ? '2' : '0');
+  return out.sort((a, b) => key(a).localeCompare(key(b)));
+}
+
+function blocks(items) {
+  const ev = items.filter(i => i.time).map(i => {
+    const s = toMin(i.time), e0 = i.end ? toMin(i.end) : s + 60;
+    return { ...i, s, e: Math.max(s + 20, e0 <= s ? 1440 : e0) };
+  }).sort((a, b) => a.s - b.s || b.e - a.e);
+  const out = [];
+  let group = [], end = -1;
+  const flush = () => {
+    const cols = [];
+    for (const x of group) { let c = cols.findIndex(ce => ce <= x.s); if (c < 0) { c = cols.length; cols.push(0); } cols[c] = x.e; x.col = c; }
+    for (const x of group) x.ncol = cols.length;
+    out.push(...group); group = [];
+  };
+  for (const x of ev) { if (x.s >= end && group.length) flush(); group.push(x); end = Math.max(end, x.e); }
+  if (group.length) flush();
+  return out;
+}
+
 VIEWS.agenda = async (v, a) => {
-  if (a) { calSel = a; calM = a.slice(0, 7); }
   const today = dkey();
-  calSel = calSel || today; calM = calM || today.slice(0, 7);
-  const [y, m] = calM.split('-').map(Number);
-  const first = new Date(y, m - 1, 1), start = new Date(first); start.setDate(1 - ((first.getDay() + 6) % 7));
-  const events = await db.all('events'), todos = await db.all('todos');
-  const dailies = (await db.all('notebooks')).filter(n => n.kind === 'daily');
-  const marks = {};
-  const mk = (k, t) => (marks[k] = marks[k] || new Set()).add(t);
-  events.forEach(e => mk(e.date, 'e')); todos.forEach(t => mk(t.date, 't')); dailies.forEach(d => mk(d.date, 'p'));
-  const ext = settings.gCalShow ? await sync.externalEvents() : [];
-  for (const e of ext) {
-    const d = fromKey(e.date);
-    for (let n = 0; n < 62 && dkey(d) < e.endEx; n++, d.setDate(d.getDate() + 1)) mk(dkey(d), 'g');
-  }
-  const cells = [];
-  for (let i = 0; i < 42; i++) {
-    const d = new Date(start); d.setDate(start.getDate() + i);
-    const k = dkey(d);
-    cells.push(`<button class="${d.getMonth() !== m - 1 ? 'out' : ''} ${k === today ? 'today' : ''} ${k === calSel ? 'on' : ''}" data-d="${k}"><span class="n">${d.getDate()}</span><span class="mk">${[...(marks[k] || [])].map(t => `<i class="${t}"></i>`).join('')}</span></button>`);
-  }
-  const dEv = events.filter(e => e.date === calSel).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
-  const dTd = todos.filter(t => t.date === calSel);
-  const dExt = sync.extOn(ext, calSel);
-  const extBlock = !settings.gConnected || !settings.gCalShow ? '' :
-    `<h3 class="row">Tus calendarios de Google</h3><div class="list">${G.granted('calRead')
-      ? (dExt.map(extRow).join('') || '<div class="li sub">Nada en tus otros calendarios este día</div>')
-      : `<div class="li sub">Falta dar permiso para ver tus calendarios. <a href="#/ajustes">Ir a Ajustes</a></div>`}</div>`;
-  const daily = dailies.find(d => d.date === calSel);
-  v.innerHTML = `<div class="row head"><h1>Agenda</h1><div class="grow"></div>
-      <button class="ib" data-m="-1">${icon('left')}</button><b class="mon">${cap(first.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' }))}</b><button class="ib" data-m="1">${icon('right')}</button>
-      <button class="btn sm ghost" data-m="0">Hoy</button></div>
-    <div class="agenda"><div><div class="cal">${['L', 'M', 'X', 'J', 'V', 'S', 'D'].map(d => `<div class="dow">${d}</div>`).join('')}${cells.join('')}</div>
-      <p class="sub legend"><i class="e"></i> evento <i class="t"></i> tarea <i class="p"></i> página escrita${ext.length ? ' <i class="g"></i> tus calendarios de Google' : ''}</p></div>
-      <section class="day"><h2>${cap(fmtDate(fromKey(calSel), { weekday: 'long', day: 'numeric', month: 'long' }))}</h2>
+  if (a) { CAL.sel = a; history.replaceState(null, '', '#/agenda'); }
+  CAL.sel = CAL.sel || today;
+  const D = await agendaData(), REG = [];
+  const reg = it => REG.push(it) - 1;
+  const chip = it => `<button class="chipev k-${it.kind} ${it.done ? 'done' : ''}" data-i="${reg(it)}" style="--c:${esc(it.color)}">${it.kind === 'todo' ? (it.done ? '☑ ' : '☐ ') : it.kind === 'page' ? icon('pen', 'inl') + ' ' : it.time ? `<b>${it.time}</b> ` : ''}${esc(it.title)}</button>`;
+  const sel = CAL.sel, view = CAL.view;
+  let title = '', body = '';
+  const dowN = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
+
+  if (view === 'month') {
+    const [y, m] = sel.split('-').map(Number);
+    const first = new Date(y, m - 1, 1);
+    const start = weekStart(dkey(first));
+    title = cap(first.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' }));
+    const weeks = (fromKey(addD(start, 35)).getMonth() === m - 1) ? 6 : 5;
+    let cells = '';
+    for (let i = 0; i < weeks * 7; i++) {
+      const k = addD(start, i), d = fromKey(k), its = itemsOn(D, k);
+      cells += `<div class="mcell ${d.getMonth() !== m - 1 ? 'out' : ''} ${k === today ? 'today' : ''} ${k === sel ? 'on' : ''}" data-d="${k}">
+        <span class="n">${d.getDate()}</span>${its.slice(0, 3).map(chip).join('')}${its.length > 3 ? `<span class="more" data-day="${k}">+${its.length - 3} más</span>` : ''}</div>`;
+    }
+    body = `<div class="mgrid">${dowN.map(x => `<div class="dow">${x}</div>`).join('')}${cells}</div>`;
+  } else {
+    const days = view === 'week' ? Array.from({ length: 7 }, (_, i) => addD(weekStart(sel), i)) : [sel];
+    if (view === 'week') {
+      const s = fromKey(days[0]), e = fromKey(days[6]);
+      title = `${s.getDate()} ${s.getMonth() !== e.getMonth() ? s.toLocaleDateString('es-ES', { month: 'short' }) + ' ' : ''}– ${e.getDate()} ${e.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' })}`;
+    } else title = cap(fmtDate(fromKey(sel), { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }));
+    const all = days.map(k => itemsOn(D, k));
+    const n = days.length, nowM = new Date().getHours() * 60 + new Date().getMinutes();
+    const grid = `<div class="tg" style="--n:${n}">
+      <div class="tg-head"><div></div>${days.map(k => { const d = fromKey(k); return `<div class="${k === today ? 'today' : ''}" data-day="${k}"><span>${d.toLocaleDateString('es-ES', { weekday: 'short' })}</span><span class="dn">${d.getDate()}</span></div>`; }).join('')}</div>
+      <div class="tg-all"><div class="gl">Todo el día</div>${all.map(its => `<div>${its.filter(i => !i.time).map(chip).join('')}</div>`).join('')}</div>
+      <div class="tg-body"><div class="tg-grid">
+        <div class="tg-hours">${Array.from({ length: 23 }, (_, hh) => `<span style="top:${(hh + 1) * HOUR}px">${pad(hh + 1)}:00</span>`).join('')}</div>
+        ${days.map((k, di) => `<div class="tg-col" data-col="${k}">${blocks(all[di]).map(b => `<button class="blk k-${b.kind}" data-i="${reg(b)}" style="--c:${esc(b.color)};top:${b.s / 60 * HOUR}px;height:${(b.e - b.s) / 60 * HOUR - 2}px;left:calc(${b.col} * 100% / ${b.ncol});width:calc(100% / ${b.ncol} - 3px)"><b>${esc(b.title)}</b><span>${b.time}${b.end ? '–' + b.end : ''}</span></button>`).join('')}
+          ${k === today ? `<div class="nowline" style="top:${nowM / 60 * HOUR}px"></div>` : ''}</div>`).join('')}
+      </div></div></div>`;
+    if (view === 'day') {
+      const its = all[0], tds = its.filter(i => i.kind === 'todo'), daily = D.dailies.find(d => d.date === sel);
+      body = `<div class="dayview">${grid}<section class="day">
         <button class="btn pri page">${icon('pen')} ${daily ? 'Abrir página del día' : 'Escribir página del día'}</button>
         ${daily?.cover ? `<img class="dthumb page" src="${daily.cover}" alt="">` : ''}
-        <h3 class="row">Eventos<div class="grow"></div><button class="btn sm ghost addev">${icon('plus')} Evento</button></h3>
-        <div class="list">${dEv.map(e => `<div class="li" data-ev="${e.id}"><b class="edit">${esc(e.time || 'Todo el día')}</b><span class="tx edit">${esc(e.title || '')}${e.rec ? ' ' + icon('repeat', 'inl') : ''}</span>${e.img ? `<img src="${e.img}" alt="">` : ''}<div class="grow"></div><button class="ib del">${icon('trash')}</button></div>`).join('') || '<div class="li sub">Sin eventos</div>'}</div>
-        ${extBlock}
         <h3 class="row">Tareas<div class="grow"></div><button class="btn sm ghost addtd">${icon('plus')} Tarea</button></h3>
-        <div class="list">${dTd.map(t => `<div class="li ${t.done ? 'done' : ''}" data-td="${t.id}"><button class="chk">${t.done ? icon('check') : ''}</button><span class="tx">${esc(t.text || '')}</span>${t.img ? `<img src="${t.img}" alt="">` : ''}<div class="grow"></div><button class="ib del">${icon('trash')}</button></div>`).join('') || '<div class="li sub">Sin tareas</div>'}</div>
-        <p class="sub">Consejo: en cualquier cuaderno, rodea lo escrito con el <b>lazo</b> y pulsa «Evento» o «Tarea» para traerlo aquí con tu letra.</p>
+        <div class="list">${tds.map(t => `<div class="li ${t.done ? 'done' : ''}"><button class="chk" data-chk="${reg(t)}">${t.done ? icon('check') : ''}</button><span class="tx edit" data-i="${reg(t)}">${esc(t.title)}</span>${t.ref.img ? `<img src="${t.ref.img}" alt="">` : ''}</div>`).join('') || '<div class="li sub">Sin tareas</div>'}</div>
+        <p class="sub">Toca una hora vacía para crear un evento. En los cuadernos, rodea lo escrito con el <b>lazo</b> y pulsa «Evento» o «Tarea» para traerlo aquí con tu letra.</p>
       </section></div>`;
+    } else body = grid;
+  }
+
+  v.innerHTML = `<div class="agwrap"><div class="row head"><h1>Agenda</h1>
+      <div class="seg vsel"><button data-v="day">Día</button><button data-v="week">Semana</button><button data-v="month">Mes</button></div>
+      <div class="grow"></div>
+      <button class="ib" data-m="-1" title="Anterior">${icon('left')}</button><b class="mon">${esc(title)}</b><button class="ib" data-m="1" title="Siguiente">${icon('right')}</button>
+      <button class="btn sm ghost" data-m="0">Hoy</button><button class="btn sm pri addany">${icon('plus')} Nuevo</button></div>
+    ${body}
+    <p class="sub legend"><i class="e"></i> tus eventos <i class="t"></i> tareas <i class="p"></i> página escrita${D.ext.length ? ' <i class="g"></i> tus calendarios de Google' : ''}</p></div>`;
+
+  v.querySelectorAll('.vsel button').forEach(b => { b.classList.toggle('on', b.dataset.v === view); b.onclick = () => { CAL.view = b.dataset.v; route(); }; });
   v.querySelectorAll('[data-m]').forEach(b => b.onclick = () => {
     const d = +b.dataset.m;
-    if (!d) { calSel = today; calM = today.slice(0, 7); }
-    else { const n = new Date(y, m - 1 + d, 1); calM = `${n.getFullYear()}-${pad(n.getMonth() + 1)}`; }
+    if (!d) CAL.sel = today;
+    else if (view === 'month') { const t = fromKey(sel); CAL.sel = dkey(new Date(t.getFullYear(), t.getMonth() + d, 1)); }
+    else CAL.sel = addD(sel, d * (view === 'week' ? 7 : 1));
     route();
   });
-  v.querySelector('.cal').onclick = e => { const b = e.target.closest('[data-d]'); if (b) { calSel = b.dataset.d; calM = calSel.slice(0, 7); route(); } };
-  v.querySelectorAll('.page').forEach(b => b.onclick = async () => openNb(await store.dailyNotebook(calSel)));
-  v.querySelector('.addev').onclick = async () => {
-    const r = await prompt('Nuevo evento', [{ name: 'time', label: 'Hora', type: 'time', value: '09:00' }, { name: 'title', label: 'Título', value: '' }], 'Añadir');
-    if (r && (r.title || r.time)) { await db.put('events', { id: uid(), date: calSel, time: r.time, title: r.title }); route(); }
-  };
-  v.querySelector('.addtd').onclick = async () => {
-    const r = await prompt('Nueva tarea', [{ name: 'text', label: 'Tarea', value: '' }], 'Añadir');
-    if (r && r.text.trim()) { await db.put('todos', { id: uid(), date: calSel, text: r.text.trim(), done: false }); route(); }
-  };
-  v.querySelectorAll('[data-ev] .edit').forEach(b => b.onclick = async () => {
-    const e = dEv.find(x => x.id === b.closest('[data-ev]').dataset.ev);
-    const r = await prompt('Editar evento', [
-      { name: 'date', label: 'Fecha', type: 'date', value: e.date },
-      { name: 'time', label: 'Hora (vacío = todo el día)', type: 'time', value: e.time },
-      { name: 'title', label: 'Título', value: e.title || '' }], 'Guardar');
-    if (r && r.date) { Object.assign(e, { date: r.date, time: r.time, title: r.title }); await db.put('events', e); calSel = r.date; calM = r.date.slice(0, 7); route(); }
+  const openDay = k => { CAL.sel = k; CAL.view = 'day'; route(); };
+  v.firstElementChild.addEventListener('click', e => {
+    const chk = e.target.closest('[data-chk]');
+    if (chk) { const t = REG[+chk.dataset.chk].ref; t.done = !t.done; db.put('todos', t).then(route); return; }
+    const it = e.target.closest('[data-i]');
+    if (it) { e.stopPropagation(); agendaItem(REG[+it.dataset.i], it); return; }
+    const day = e.target.closest('[data-day]');
+    if (day) { openDay(day.dataset.day); return; }
+    const cell = e.target.closest('.mcell');
+    if (cell) { openDay(cell.dataset.d); return; }
+    const col = e.target.closest('.tg-col');
+    if (col) {
+      const r = col.getBoundingClientRect(), mins = Math.max(0, Math.min(1410, Math.floor((e.clientY - r.top) / HOUR * 2) * 30));
+      newEvent(col.dataset.col, fromMin(mins));
+    }
   });
-  v.querySelectorAll('[data-td] .tx').forEach(b => b.onclick = async () => {
-    const t = dTd.find(x => x.id === b.closest('[data-td]').dataset.td);
-    const r = await prompt('Editar tarea', [{ name: 'date', label: 'Fecha', type: 'date', value: t.date }, { name: 'text', label: 'Tarea', value: t.text || '' }], 'Guardar');
-    if (r && r.date) { Object.assign(t, { date: r.date, text: r.text.trim() }); await db.put('todos', t); route(); }
-  });
-  v.querySelectorAll('[data-ev] .del').forEach(b => b.onclick = async () => { if (await confirm('¿Eliminar este evento?', 'Eliminar')) { await db.del('events', b.closest('[data-ev]').dataset.ev); route(); } });
-  v.querySelectorAll('[data-td] .del').forEach(b => b.onclick = async () => { if (await confirm('¿Eliminar esta tarea?', 'Eliminar')) { await db.del('todos', b.closest('[data-td]').dataset.td); route(); } });
-  v.querySelectorAll('[data-td] .chk').forEach(b => b.onclick = async () => { const t = dTd.find(x => x.id === b.closest('[data-td]').dataset.td); t.done = !t.done; await db.put('todos', t); route(); });
+  v.querySelector('.addany').onclick = e => menu(e.currentTarget, [
+    { icon: 'event', label: 'Evento', run: () => newEvent(CAL.sel, '09:00') },
+    { icon: 'task', label: 'Tarea', run: () => newTodo(CAL.sel) },
+    { icon: 'pen', label: 'Página del día', run: async () => openNb(await store.dailyNotebook(CAL.sel)) }
+  ]);
+  v.querySelectorAll('.page').forEach(b => b.onclick = async () => openNb(await store.dailyNotebook(sel)));
+  v.querySelector('.addtd')?.addEventListener('click', () => newTodo(sel));
+  const tb = v.querySelector('.tg-body');
+  if (tb) tb.scrollTop = Math.max(0, ((sel <= today && today <= addD(view === 'week' ? weekStart(sel) : sel, view === 'week' ? 6 : 0)) ? new Date().getHours() - 1 : 7) * HOUR);
 };
+
+const DURS = [['15', '15 min'], ['30', '30 min'], ['45', '45 min'], ['60', '1 hora'], ['90', '1 h 30'], ['120', '2 horas'], ['180', '3 horas'], ['240', '4 horas']];
+async function newEvent(date, time) {
+  const r = await prompt('Nuevo evento', [
+    { name: 'title', label: 'Título', value: '' },
+    { name: 'date', label: 'Fecha', type: 'date', value: date },
+    { name: 'time', label: 'Hora (vacío = todo el día)', type: 'time', value: time },
+    { name: 'dur', label: 'Duración', type: 'select', value: '60', options: DURS.map(([value, label]) => ({ value, label })) }], 'Crear');
+  if (r && r.date && (r.title.trim() || r.time)) { await db.put('events', { id: uid(), date: r.date, time: r.time, dur: +r.dur, title: r.title.trim() }); CAL.sel = r.date; route(); }
+}
+async function newTodo(date) {
+  const r = await prompt('Nueva tarea', [{ name: 'text', label: 'Tarea', value: '' }, { name: 'date', label: 'Fecha', type: 'date', value: date }], 'Añadir');
+  if (r && r.text.trim()) { await db.put('todos', { id: uid(), date: r.date || date, text: r.text.trim(), done: false }); route(); }
+}
+
+async function openSrc(src) {
+  const nb = await db.get('notebooks', src.nb);
+  if (!nb) return toast('Ese cuaderno ya no existe');
+  const i = nb.pages.indexOf(src.pid);
+  openNb(nb, i >= 0 ? i : undefined);
+}
+
+function agendaItem(it, anchor) {
+  const ref = it.ref;
+  if (it.kind === 'page') { openNb(ref); return; }
+  if (it.kind === 'ext') {
+    modal(it.title, `<div class="list">
+      <div class="li"><i class="cdot" style="background:${esc(ref.color)}"></i><span>${esc(ref.calName)}</span></div>
+      <div class="li">${icon('clock')}<span>${cap(fmtDate(fromKey(ref.date), { weekday: 'long', day: 'numeric', month: 'long' }))} · ${ref.time ? esc(ref.time) + (ref.endTime ? '–' + esc(ref.endTime) : '') : 'Todo el día'}</span></div>
+      ${ref.loc ? `<div class="li">${icon('home')}<span>${esc(ref.loc)}</span></div>` : ''}</div>
+      <p class="sub">Evento de tu Google Calendar: se cambia desde Google Calendar.</p>`);
+    return;
+  }
+  if (it.kind === 'todo') {
+    menu(anchor, [
+      { icon: 'check', label: ref.done ? 'Marcar como pendiente' : 'Marcar como hecha', run: async () => { ref.done = !ref.done; await db.put('todos', ref); route(); } },
+      ref.img && { icon: 'image', label: 'Ver lo escrito', run: () => modal(ref.text || 'Tarea', `<img src="${ref.img}" style="max-width:100%;background:#fff;border-radius:8px">`) },
+      ref.src && { icon: 'notebook', label: 'Abrir en el cuaderno', run: () => openSrc(ref.src) },
+      { icon: 'pen2', label: 'Editar', run: async () => {
+        const r = await prompt('Editar tarea', [{ name: 'text', label: 'Tarea', value: ref.text || '' }, { name: 'date', label: 'Fecha', type: 'date', value: ref.date }], 'Guardar');
+        if (r && r.date) { Object.assign(ref, { date: r.date, text: r.text.trim() }); await db.put('todos', ref); route(); }
+      } },
+      { icon: 'trash', label: 'Eliminar', danger: true, run: async () => { if (await confirm('¿Eliminar esta tarea?', 'Eliminar')) { await db.del('todos', ref.id); route(); } } }
+    ]);
+    return;
+  }
+  menu(anchor, [
+    ref.img && { icon: 'image', label: 'Ver lo escrito', run: () => modal(ref.title || 'Evento', `<img src="${ref.img}" style="max-width:100%;background:#fff;border-radius:8px">`) },
+    ref.src && { icon: 'notebook', label: 'Abrir en el cuaderno', run: () => openSrc(ref.src) },
+    { icon: 'pen2', label: 'Editar', run: async () => {
+      const r = await prompt('Editar evento', [
+        { name: 'title', label: 'Título', value: ref.title || '' },
+        { name: 'date', label: 'Fecha', type: 'date', value: ref.date },
+        { name: 'time', label: 'Hora (vacío = todo el día)', type: 'time', value: ref.time },
+        { name: 'dur', label: 'Duración', type: 'select', value: String(ref.dur || 60), options: DURS.map(([value, label]) => ({ value, label })) }], 'Guardar');
+      if (r && r.date) { Object.assign(ref, { date: r.date, time: r.time, title: r.title.trim(), dur: +r.dur }); await db.put('events', ref); CAL.sel = r.date; route(); }
+    } },
+    { icon: 'trash', label: 'Eliminar', danger: true, run: async () => { if (await confirm('¿Eliminar este evento?', 'Eliminar')) { await db.del('events', ref.id); route(); } } }
+  ]);
+}
 
 // ---- Reuniones ----
 VIEWS.reuniones = async v => {
@@ -583,6 +724,9 @@ VIEWS.ajustes = async v => {
       <button class="btn sm aisave">Guardar</button><button class="btn sm ghost aitest">Probar</button></div>
       <a class="btn sm ghost" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="margin-top:10px">${icon('spark')} Crear clave en Google AI Studio</a></div></div>
     <div class="set"><div class="tx">Cómo se usa<small>En cualquier cuaderno: botón ${icon('spark', 'inl')} de la barra (pasar a texto, pasar a limpio, resumir, sacar citas y tareas, preguntar, traducir, resumir grabaciones) o rodea algo con el lazo y pulsa «A texto».</small></div></div>
+    <h2>Privacidad</h2>
+    <div class="set"><div class="tx">Bloqueo con PIN<small>${settings.pin ? 'Activado: se pide al abrir la app y tras 2 minutos sin usarla.' : 'Pide un PIN de 4 a 8 cifras al abrir la app. Protege de miradas, pero no cifra los datos.'}</small></div>
+      ${settings.pin ? `<button class="btn sm ghost pinoff">Quitar PIN</button>` : `<button class="btn sm pinon">${icon('lockKey')} Poner PIN</button>`}</div>
     <h2>Datos</h2>
     <div class="set"><div class="tx">Almacenamiento<small>${est || 'Todo se guarda solo en esta tablet, en el navegador.'} ${persisted ? '· protegido contra borrado automático' : ''}</small></div></div>
     <div class="set"><div class="tx">Copia de seguridad<small>Descarga un archivo con todos tus cuadernos, agenda y audios. Guárdalo en Drive de vez en cuando.</small></div><button class="btn sm exp">${icon('download')} Exportar</button><button class="btn sm ghost imp">${icon('upload')} Restaurar</button></div>
@@ -598,6 +742,19 @@ VIEWS.ajustes = async v => {
   v.querySelector('.gout')?.addEventListener('click', async () => {
     if (!await confirm('¿Desconectar de Google en esta tablet?', 'Desconectar', 'Tus datos se quedan en la tablet y en Drive; solo deja de sincronizar.')) return;
     G.signOut(); sync.refreshState(); paintCloud(); route();
+  });
+  v.querySelector('.pinon')?.addEventListener('click', async () => {
+    const r = await prompt('Poner PIN', [{ name: 'a', label: 'PIN (4 a 8 cifras)', type: 'password', value: '' }, { name: 'b', label: 'Repite el PIN', type: 'password', value: '' }], 'Guardar');
+    if (!r) return;
+    if (!/^\d{4,8}$/.test(r.a)) return toast('El PIN debe tener entre 4 y 8 cifras');
+    if (r.a !== r.b) return toast('Los dos PIN no coinciden');
+    settings.pin = await sha(r.a); saveSettings(); toast('PIN activado'); route();
+  });
+  v.querySelector('.pinoff')?.addEventListener('click', async () => {
+    const r = await prompt('Quitar PIN', [{ name: 'a', label: 'PIN actual', type: 'password', value: '' }], 'Quitar');
+    if (!r) return;
+    if (await sha(r.a) !== settings.pin) return toast('PIN incorrecto');
+    settings.pin = ''; saveSettings(); toast('PIN quitado'); route();
   });
   v.querySelector('.aisave').onclick = () => { settings.aiKey = v.querySelector('.aikey').value.trim(); saveSettings(); toast(settings.aiKey ? 'Clave de Gemini guardada' : 'Clave quitada'); };
   v.querySelector('.aitest').onclick = async () => {
@@ -624,10 +781,36 @@ VIEWS.ajustes = async v => {
   };
 };
 
+// ---------------- bloqueo con PIN ----------------
+const sha = async t => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('cuaderno:' + t)))].map(b => b.toString(16).padStart(2, '0')).join('');
+let hiddenAt = 0;
+function lockScreen() {
+  if (!settings.pin || document.querySelector('.lock')) return;
+  let code = '';
+  const el = h(`<div class="lock"><div class="lockbox">${icon('lockKey')}<h2>Cuaderno</h2><p class="sub">Escribe tu PIN</p><div class="dots"></div>
+    <div class="keys">${[1, 2, 3, 4, 5, 6, 7, 8, 9, '', 0, '⌫'].map(k => k === '' ? '<span></span>' : `<button data-k="${k}">${k}</button>`).join('')}</div></div></div>`);
+  const dots = el.querySelector('.dots');
+  const draw = () => { dots.textContent = '●'.repeat(code.length) || ' '; };
+  el.addEventListener('click', async e => {
+    const b = e.target.closest('[data-k]'); if (!b) return;
+    code = b.dataset.k === '⌫' ? code.slice(0, -1) : (code + b.dataset.k).slice(0, 8);
+    draw();
+    if (code.length >= 4 && await sha(code) === settings.pin) el.remove();
+    else if (code.length === 8) { code = ''; draw(); toast('PIN incorrecto'); }
+  });
+  draw();
+  document.body.append(el);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') hiddenAt = Date.now();
+  else if (settings.pin && hiddenAt && Date.now() - hiddenAt > 120000) lockScreen();
+});
+
 // ---------------- arranque ----------------
 addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; });
 (async () => {
   await loadSettings();
+  lockScreen();
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
     // Cuando llega una versión nueva, la app se recarga sola (fuera del editor, para no perder nada).
