@@ -24,6 +24,7 @@ export const settings = {
   gDrive: true,
   gCal: true,
   gTasks: true,
+  gCalShow: true,   // ver también tus otros calendarios de Google (solo lectura)
   gScopes: [],
   gFolder: null,
   gLast: null,

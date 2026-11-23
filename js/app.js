@@ -185,6 +185,9 @@ function nbMenu(anchor, nb, refresh) {
   ]);
 }
 
+// Evento de tus otros calendarios de Google (solo lectura).
+const extRow = e => `<div class="li ext"><i class="cdot" style="background:${esc(e.color)}"></i><b>${e.time ? esc(e.time) + (e.endTime ? '–' + esc(e.endTime) : '') : 'Todo el día'}</b><span class="tx">${esc(e.title)}${e.loc ? ` <span class="sub">· ${esc(e.loc)}</span>` : ''}</span><div class="grow"></div><span class="sub">${esc(e.calName)}</span></div>`;
+
 const empty = (ic, t, s) => `<div class="empty">${icon(ic)}<b>${t}</b><span>${s}</span></div>`;
 
 function tplPicker(sel) {
@@ -210,10 +213,11 @@ VIEWS.home = async v => {
   const recent = (await store.getRecent()).map(id => nbs.find(n => n.id === id)).filter(Boolean).slice(0, 6);
   const evs = (await db.all('events')).filter(e => e.date === today).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
   const tds = (await db.all('todos')).filter(t => t.date === today || (!t.done && t.date < today));
+  const ext = settings.gCalShow ? sync.extOn(await sync.externalEvents(), today) : [];
   const count = k => nbs.filter(n => n.kind === k).length;
   const tiles = [
     ['papel', 'notebook', 'Cuadernos', `${count('paper')} cuadernos`],
-    ['agenda', 'calendar', 'Agenda', `${evs.length} eventos hoy`],
+    ['agenda', 'calendar', 'Agenda', `${evs.length + ext.length} eventos hoy`],
     ['reuniones', 'mic', 'Reuniones', `${count('meeting')} reuniones`],
     ['biblioteca', 'library', 'Biblioteca', `${count('book')} documentos`],
     ['recortes', 'picking', 'Recortes', `${count('picking')} recortes`],
@@ -226,8 +230,9 @@ VIEWS.home = async v => {
       <section><h2>Continuar</h2>${recent.length ? `<div class="covers rc">${recent.map(n => cover(n, KIND_NAME[n.kind] + ' · ' + fmtDate(n.updated))).join('')}</div>` : empty('notebook', 'Nada reciente', 'Crea un cuaderno o una nota rápida para empezar.')}</section>
       <section><h2>Hoy</h2><div class="list">
         ${evs.map(e => `<div class="li">${icon('clock')}<b>${esc(e.time)}</b><span class="tx">${esc(e.title || '')}</span>${e.img ? `<img src="${e.img}" alt="">` : ''}</div>`).join('')}
+        ${ext.map(extRow).join('')}
         ${tds.map(t => `<div class="li ${t.done ? 'done' : ''}" data-td="${t.id}"><button class="chk">${t.done ? icon('check') : ''}</button><span class="tx">${esc(t.text || '')}</span>${t.img ? `<img src="${t.img}" alt="">` : ''}${t.date < today ? '<span class="sub">atrasada</span>' : ''}</div>`).join('')}
-        ${!evs.length && !tds.length ? '<div class="li sub">Sin eventos ni tareas para hoy.</div>' : ''}
+        ${!evs.length && !tds.length && !ext.length ? '<div class="li sub">Sin eventos ni tareas para hoy.</div>' : ''}
       </div><a class="btn sm ghost" href="#/agenda" style="margin-top:12px">${icon('calendar')} Abrir agenda</a></section>
     </div>`;
   bindCovers(v.querySelector('.rc') || h('<div></div>'), recent, () => route());
@@ -290,6 +295,11 @@ VIEWS.agenda = async (v, a) => {
   const marks = {};
   const mk = (k, t) => (marks[k] = marks[k] || new Set()).add(t);
   events.forEach(e => mk(e.date, 'e')); todos.forEach(t => mk(t.date, 't')); dailies.forEach(d => mk(d.date, 'p'));
+  const ext = settings.gCalShow ? await sync.externalEvents() : [];
+  for (const e of ext) {
+    const d = fromKey(e.date);
+    for (let n = 0; n < 62 && dkey(d) < e.endEx; n++, d.setDate(d.getDate() + 1)) mk(dkey(d), 'g');
+  }
   const cells = [];
   for (let i = 0; i < 42; i++) {
     const d = new Date(start); d.setDate(start.getDate() + i);
@@ -298,17 +308,23 @@ VIEWS.agenda = async (v, a) => {
   }
   const dEv = events.filter(e => e.date === calSel).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
   const dTd = todos.filter(t => t.date === calSel);
+  const dExt = sync.extOn(ext, calSel);
+  const extBlock = !settings.gConnected || !settings.gCalShow ? '' :
+    `<h3 class="row">Tus calendarios de Google</h3><div class="list">${G.granted('calRead')
+      ? (dExt.map(extRow).join('') || '<div class="li sub">Nada en tus otros calendarios este día</div>')
+      : `<div class="li sub">Falta dar permiso para ver tus calendarios. <a href="#/ajustes">Ir a Ajustes</a></div>`}</div>`;
   const daily = dailies.find(d => d.date === calSel);
   v.innerHTML = `<div class="row head"><h1>Agenda</h1><div class="grow"></div>
       <button class="ib" data-m="-1">${icon('left')}</button><b class="mon">${cap(first.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' }))}</b><button class="ib" data-m="1">${icon('right')}</button>
       <button class="btn sm ghost" data-m="0">Hoy</button></div>
     <div class="agenda"><div><div class="cal">${['L', 'M', 'X', 'J', 'V', 'S', 'D'].map(d => `<div class="dow">${d}</div>`).join('')}${cells.join('')}</div>
-      <p class="sub legend"><i class="e"></i> evento <i class="t"></i> tarea <i class="p"></i> página escrita</p></div>
+      <p class="sub legend"><i class="e"></i> evento <i class="t"></i> tarea <i class="p"></i> página escrita${ext.length ? ' <i class="g"></i> tus calendarios de Google' : ''}</p></div>
       <section class="day"><h2>${cap(fmtDate(fromKey(calSel), { weekday: 'long', day: 'numeric', month: 'long' }))}</h2>
         <button class="btn pri page">${icon('pen')} ${daily ? 'Abrir página del día' : 'Escribir página del día'}</button>
         ${daily?.cover ? `<img class="dthumb page" src="${daily.cover}" alt="">` : ''}
         <h3 class="row">Eventos<div class="grow"></div><button class="btn sm ghost addev">${icon('plus')} Evento</button></h3>
         <div class="list">${dEv.map(e => `<div class="li" data-ev="${e.id}"><b class="edit">${esc(e.time || 'Todo el día')}</b><span class="tx edit">${esc(e.title || '')}${e.rec ? ' ' + icon('repeat', 'inl') : ''}</span>${e.img ? `<img src="${e.img}" alt="">` : ''}<div class="grow"></div><button class="ib del">${icon('trash')}</button></div>`).join('') || '<div class="li sub">Sin eventos</div>'}</div>
+        ${extBlock}
         <h3 class="row">Tareas<div class="grow"></div><button class="btn sm ghost addtd">${icon('plus')} Tarea</button></h3>
         <div class="list">${dTd.map(t => `<div class="li ${t.done ? 'done' : ''}" data-td="${t.id}"><button class="chk">${t.done ? icon('check') : ''}</button><span class="tx">${esc(t.text || '')}</span>${t.img ? `<img src="${t.img}" alt="">` : ''}<div class="grow"></div><button class="ib del">${icon('trash')}</button></div>`).join('') || '<div class="li sub">Sin tareas</div>'}</div>
         <p class="sub">Consejo: en cualquier cuaderno, rodea lo escrito con el <b>lazo</b> y pulsa «Evento» o «Tarea» para traerlo aquí con tu letra.</p>
@@ -481,6 +497,8 @@ VIEWS.ajustes = async v => {
     ${tog('gDrive', 'Cuadernos entre tablets', 'Guarda cuadernos, notas, PDF y audios en la carpeta «Cuaderno (sincronización)» de tu Google Drive.')}
     ${tog('gCal', 'Agenda ↔ Google Calendar', 'Los eventos van a un calendario propio llamado «Cuaderno», en los dos sentidos.')}
     ${tog('gTasks', 'Tareas ↔ Google Tasks', 'Las tareas van a una lista llamada «Cuaderno», en los dos sentidos.')}
+    ${tog('gCalShow', 'Ver mis otros calendarios', 'Muestra en la Agenda e Inicio los eventos de tus demás calendarios de Google (personal, familia…). Solo se ven: no se modifican desde la app.')}
+    ${settings.gConnected && !G.granted('calRead') ? `<div class="set"><div class="tx">Permiso para ver tus calendarios<small>Pulsa y acepta el nuevo permiso de Google («Ver tus calendarios»).</small></div><button class="btn sm pri gperm">${icon('calendar')} Dar permiso</button></div>` : ''}
     <details class="set gid"><summary class="tx">ID de cliente de Google<small>${G.clientId() ? 'Configurado: …' + esc(G.clientId().slice(-34)) : 'Falta configurarlo (ver guía de registro).'}</small></summary>
       <div class="row" style="width:100%;margin-top:10px"><input class="gcid" placeholder="xxxxxxxx.apps.googleusercontent.com" value="${esc(settings.gClientId)}" style="flex:1;padding:10px;border:1.5px solid var(--line2);border-radius:10px;background:var(--paper);color:var(--ink)"><button class="btn sm gsave">Guardar</button></div></details>
     <h2>Inteligencia artificial (Gemini)</h2>
@@ -499,6 +517,7 @@ VIEWS.ajustes = async v => {
   v.querySelectorAll('.seg[data-k]').forEach(s => s.onclick = e => { const b = e.target.closest('[data-v]'); if (!b) return; settings[s.dataset.k] = b.dataset.v; saveSettings(); s.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); });
   G.prepare().catch(() => {});
   v.querySelector('.gin')?.addEventListener('click', async () => { await connectGoogle(); route(); });
+  v.querySelector('.gperm')?.addEventListener('click', async () => { await connectGoogle(); route(); });
   v.querySelector('.gsync')?.addEventListener('click', async () => { await cloudTap(); route(); });
   v.querySelector('.gout')?.addEventListener('click', async () => {
     if (!await confirm('¿Desconectar de Google en esta tablet?', 'Desconectar', 'Tus datos se quedan en la tablet y en Drive; solo deja de sincronizar.')) return;

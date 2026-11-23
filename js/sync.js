@@ -44,6 +44,7 @@ async function run() {
     if (settings.gCal && granted('cal')) g = (await syncCalendar(ctx, changed)) || g;
     if (settings.gTasks && granted('tasks')) g = (await syncTasks(ctx, changed)) || g;
     if (g && settings.gDrive) await mergeDrive(ctx, changed);
+    if (settings.gCalShow && granted('calRead')) await fetchExternal(ctx, changed);
     await saveIndex(ctx);
     state.status = 'ok'; state.msg = ''; state.last = Date.now();
     settings.gLast = state.last; saveSettings();
@@ -302,6 +303,43 @@ async function syncCalendar(ctx, changed) {
   await db.put('kv', { id: 'gcal', v: { cal, token: newToken } });
   return local;
 }
+
+// ---------------- Tus otros calendarios (solo lectura) ----------------
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+
+async function fetchExternal(ctx, changed) {
+  const cl = await (await api(`${CAL}/users/me/calendarList?maxResults=250`)).json();
+  const cals = (cl.items || []).filter(c => c.id !== ctx.index.cal && c.selected !== false && !c.hidden && !c.deleted);
+  const now = new Date();
+  const tmin = new Date(now.getFullYear(), now.getMonth() - 2, 1).toISOString();
+  const tmax = new Date(now.getFullYear(), now.getMonth() + 7, 1).toISOString();
+  const out = [];
+  for (const c of cals) {
+    let next = null;
+    do {
+      const r = await api(`${CAL}/calendars/${enc(c.id)}/events?singleEvents=true&orderBy=startTime&maxResults=2500&timeMin=${enc(tmin)}&timeMax=${enc(tmax)}` + (next ? `&pageToken=${enc(next)}` : ''), { ok: [403, 404] });
+      if (!r.ok) break;
+      const j = await r.json();
+      for (const ev of j.items || []) {
+        if (ev.status === 'cancelled' || !ev.start) continue;
+        const o = { cal: c.id, calName: c.summaryOverride || c.summary || '', color: c.backgroundColor || '#7a7a7a', title: ev.summary || '(sin título)', loc: ev.location || '' };
+        if (ev.start.date) Object.assign(o, { date: ev.start.date, endEx: ev.end?.date || dkey(addDays(new Date(ev.start.date + 'T00:00'), 1)), time: '' });
+        else {
+          const s = new Date(ev.start.dateTime), e = new Date(ev.end?.dateTime || s.getTime() + 3600e3);
+          Object.assign(o, { date: dkey(s), endEx: dkey(addDays(new Date(Math.max(s.getTime(), e.getTime() - 1)), 1)), time: `${pad(s.getHours())}:${pad(s.getMinutes())}`, endTime: `${pad(e.getHours())}:${pad(e.getMinutes())}` });
+        }
+        out.push(o);
+      }
+      next = j.nextPageToken;
+    } while (next);
+  }
+  const prev = JSON.stringify(await externalEvents());
+  await db.put('kv', { id: 'gext', v: { at: Date.now(), events: out } });
+  if (prev !== JSON.stringify(out)) changed.add('kv/gext');
+}
+
+export async function externalEvents() { return (await db.get('kv', 'gext'))?.v?.events || []; }
+export const extOn = (list, key) => list.filter(e => key >= e.date && key < e.endEx).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
 
 // ---------------- Google Tasks ----------------
 async function ensureList(ctx) {

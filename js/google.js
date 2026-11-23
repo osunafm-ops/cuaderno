@@ -8,6 +8,7 @@ export const DEFAULT_CLIENT_ID = '353847478669-qr3jkf39dn52liurf5hsldiffm847qqo.
 export const SCOPE = {
   drive: 'https://www.googleapis.com/auth/drive.file',
   cal: 'https://www.googleapis.com/auth/calendar.app.created',
+  calRead: 'https://www.googleapis.com/auth/calendar.readonly',
   tasks: 'https://www.googleapis.com/auth/tasks'
 };
 
