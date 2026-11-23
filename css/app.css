@@ -187,6 +187,9 @@ h3 { font-size: 15px; margin: 22px 0 8px; }
 .selbox { position: absolute; border: 1.5px dashed #141414; pointer-events: none; }
 .handle { position: absolute; right: -16px; bottom: -16px; width: 30px; height: 30px; border-radius: 50%; background: #141414; border: 3px solid #fff; pointer-events: auto; touch-action: none; cursor: nwse-resize; }
 .selbar { position: absolute; display: flex; gap: 1px; padding: 4px; background: #fbfaf6; color: #141414; border: 1.5px solid #141414; border-radius: 10px; pointer-events: auto; white-space: nowrap; z-index: 2; }
+.selbar { flex-wrap: wrap; max-width: calc(100% - 8px); white-space: normal; }
+.aires { width: 100%; min-height: 280px; padding: 12px; border: 1.5px solid var(--line2); border-radius: 10px; background: var(--paper); color: var(--ink); font-family: var(--serif); font-size: 15px; line-height: 1.5; resize: vertical; outline: 0; }
+.modal .list label.li { cursor: pointer; }
 .selbar button { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 7px; font-size: 11px; border-radius: 8px; }
 .selbar button svg.i { width: 20px; height: 20px; }
 .selbar button:active { background: #14141414; }

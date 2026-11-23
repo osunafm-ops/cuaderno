@@ -26,7 +26,10 @@ export const settings = {
   gTasks: true,
   gScopes: [],
   gFolder: null,
-  gLast: null
+  gLast: null,
+  // Gemini (IA): la clave se guarda solo en esta tablet
+  aiKey: '',
+  aiModel: ''
 };
 
 export const PAPER = { eink: '#f4f3ee', white: '#ffffff', cream: '#f7f1e3' };

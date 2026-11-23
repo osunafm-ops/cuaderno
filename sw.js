@@ -1,10 +1,10 @@
 // Service worker: la app funciona sin conexión una vez abierta la primera vez.
-const V = 'cuaderno-v2';
+const V = 'cuaderno-v3';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/db.js', 'js/ui.js', 'js/icons.js', 'js/settings.js', 'js/store.js',
   'js/ink.js', 'js/templates.js', 'js/render.js', 'js/pdf.js', 'js/editor.js',
-  'js/google.js', 'js/sync.js',
+  'js/google.js', 'js/sync.js', 'js/ai.js',
   'icons/icon-192.png', 'icons/icon-512.png'
 ];
 // Solo se guardan copias de la propia app y de sus librerías; nunca de las APIs de Google.

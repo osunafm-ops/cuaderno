@@ -8,6 +8,7 @@ import { h, icon, esc, pop, menu, modal, prompt, confirm, toast, flash, pickFile
 import * as store from './store.js';
 import { drawBackground, pagePNG, notebookPDF, pageCanvas, safeName } from './render.js';
 import { hooks as syncHooks, onSync } from './sync.js';
+import * as AI from './ai.js';
 
 let CLIP = null; // portapapeles compartido entre cuadernos
 const GRAYS = ['#141414', '#4a4a4a', '#7a7a7a', '#a8a8a8', '#ffffff'];
@@ -36,7 +37,8 @@ export class Editor {
         <button data-t="eraser" title="Borrador">${icon('eraser')}</button>
         <button data-t="lasso" title="Lazo">${icon('lasso')}</button>
         <button data-t="text" title="Texto">${icon('text')}</button>
-        <button data-a="image" title="Insertar imagen">${icon('image')}</button><hr>
+        <button data-a="image" title="Insertar imagen">${icon('image')}</button>
+        <button data-a="ai" title="Gemini (IA)">${icon('spark')}</button><hr>
         <button data-a="undo" title="Deshacer">${icon('undo')}</button>
         <button data-a="redo" title="Rehacer">${icon('redo')}</button><hr>
         <button data-a="layers" title="Capas">${icon('layers')}</button>
@@ -607,7 +609,7 @@ export class Editor {
     const box = h(`<div class="selbox"><div class="handle" title="Cambiar tamaño"></div></div>`);
     this.ovl.append(box); this.updSelBox();
     const bar = h(`<div class="selbar">
-      <button data-s="copy">${icon('copy')}Copiar</button><button data-s="cut">${icon('cut')}Cortar</button>
+      <button data-s="ocr">${icon('spark')}A texto</button><button data-s="copy">${icon('copy')}Copiar</button><button data-s="cut">${icon('cut')}Cortar</button>
       <button data-s="dup">${icon('dup')}Duplicar</button><button data-s="del">${icon('trash')}Borrar</button>
       <button data-s="layer">${icon('moveLayer')}Capa</button><button data-s="event">${icon('event')}Evento</button>
       <button data-s="todo">${icon('task')}Tarea</button><button data-s="pick">${icon('picking')}Recorte</button></div>`);
@@ -687,7 +689,128 @@ export class Editor {
         break;
       }
       case 'pick': await store.newPicking(this.selImage()); toast('Guardado en Recortes'); break;
+      case 'ocr': {
+        if (!this.aiReady()) return;
+        const b = ink.unionBox(objs), img = this.selImage();
+        const text = await this.aiBusy(() => AI.ask([{ text: AI.P.ocr }, AI.dataUrlPart(img.src)]));
+        if (text) this.aiResult('Texto reconocido', text, { x: b.x, y: Math.min(H - 120, b.y + b.h + 30) });
+        break;
+      }
     }
+  }
+
+  // ---------------- Gemini (IA) ----------------
+  aiReady() {
+    if (AI.hasKey()) return true;
+    confirm('Falta la clave de Gemini', 'Ir a Ajustes', 'Para usar la IA, crea una clave gratuita en Google AI Studio y pégala en Ajustes → Inteligencia artificial.')
+      .then(ok => { if (ok) location.hash = '#/ajustes'; });
+    return false;
+  }
+
+  async aiBusy(fn) {
+    const t = toast('Gemini está pensando…', 180000);
+    try { return await fn(); }
+    catch (e) { toast(e.message || 'Error de Gemini', 6000); return null; }
+    finally { t.remove(); }
+  }
+
+  async pageParts(all) {
+    await this.flushSave();
+    const ids = all ? this.nb.pages.slice(0, 30) : [this.nb.pages[this.idx]];
+    const parts = [];
+    for (const id of ids) {
+      const p = id === this.page.id ? this.page : await db.get('pages', id);
+      if (p) parts.push(AI.canvasPart(await pageCanvas(p, this.nb, 0.75), 0.72));
+    }
+    return parts;
+  }
+
+  aiMenu(btn) {
+    if (!this.aiReady()) return;
+    const run = (title, prompt, all) => async () => {
+      const text = await this.aiBusy(async () => AI.ask([{ text: prompt }, ...await this.pageParts(all)]));
+      if (text) this.aiResult(title, text);
+    };
+    menu(btn, [
+      { icon: 'text', label: 'Pasar esta página a texto', run: run('Texto de la página', AI.P.ocr, false) },
+      { icon: 'pen2', label: 'Pasar a limpio esta página', run: run('Pasado a limpio', AI.P.clean, false) },
+      { icon: 'notebook', label: 'Resumir esta página', run: run('Resumen de la página', AI.P.summary, false) },
+      this.nb.pages.length > 1 && { icon: 'pages', label: 'Resumir todo el cuaderno', run: run('Resumen del cuaderno', AI.P.summary, true) },
+      { icon: 'event', label: 'Sacar citas y tareas a la Agenda', run: () => this.aiExtract() },
+      { icon: 'search', label: 'Preguntar a este cuaderno', run: () => this.aiAsk() },
+      { icon: 'share', label: 'Traducir esta página', run: () => this.aiTranslate() },
+      this.nb.kind === 'meeting' && { icon: 'headphones', label: 'Resumir una grabación', run: () => this.aiMeeting() }
+    ], { side: this.side() });
+  }
+
+  aiResult(title, text, at) {
+    const ta = h('<textarea class="aires" rows="12" spellcheck="false"></textarea>');
+    ta.value = text;
+    modal(title + ' · Gemini', ta, [
+      { label: 'Cerrar', value: null },
+      { label: 'Copiar', value: () => { navigator.clipboard?.writeText(ta.value).then(() => toast('Copiado'), () => toast('No se pudo copiar')); return undefined; } },
+      { label: 'Insertar en la página', pri: true, value: () => ta.value }
+    ], { wide: true }).then(v => { if (v) this.insertText(v, at); });
+  }
+
+  insertText(text, at = { x: 90, y: 110 }) {
+    if (this.isLocked()) return toast('Página bloqueada');
+    this.snap();
+    const size = Math.min(settings.textSize, 32);
+    const o = { t: 'x', x: at.x, y: at.y, size, c: settings.pens[0].c, text: AI.wrap(text.trim(), size, W - at.x - 60) };
+    this.layer().objs.push(o);
+    this.tool = 'lasso'; this.updTools();
+    this.renderInk(); this.select([o]); this.dirty();
+    toast('Texto insertado: muévelo con el lazo si hace falta');
+  }
+
+  async aiExtract() {
+    const all = this.nb.kind === 'meeting' && this.nb.pages.length > 1;
+    const res = await this.aiBusy(async () => AI.ask([{ text: AI.P.extract() }, ...await this.pageParts(all)], { json: true }));
+    if (!res) return;
+    const okDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d || '');
+    const evs = (res.eventos || []).filter(e => e.titulo && okDate(e.fecha));
+    const tds = (res.tareas || []).filter(t => t.texto).map(t => ({ ...t, fecha: okDate(t.fecha) ? t.fecha : dkey() }));
+    if (!evs.length && !tds.length) return toast('Gemini no encontró citas ni tareas en esta página', 4000);
+    const el = h(`<div class="list">${evs.map((e, i) => `<label class="li"><input type="checkbox" checked data-e="${i}"> ${icon('event')} <b>${esc(e.fecha)} ${esc(e.hora || '')}</b> <span class="tx">${esc(e.titulo)}</span></label>`).join('')}
+      ${tds.map((t, i) => `<label class="li"><input type="checkbox" checked data-t="${i}"> ${icon('task')} <b>${esc(t.fecha)}</b> <span class="tx">${esc(t.texto)}</span></label>`).join('')}</div>`);
+    const ok = await modal('Añadir a la Agenda', el, [{ label: 'Cancelar', value: false }, { label: 'Añadir marcados', pri: true, value: true }]);
+    if (!ok) return;
+    let n = 0;
+    for (const c of el.querySelectorAll('input:checked')) {
+      if (c.dataset.e !== undefined) { const e = evs[+c.dataset.e]; await db.put('events', { id: uid(), date: e.fecha, time: /^\d{2}:\d{2}$/.test(e.hora || '') ? e.hora : '', title: e.titulo }); }
+      else { const t = tds[+c.dataset.t]; await db.put('todos', { id: uid(), date: t.fecha, text: t.texto, done: false }); }
+      n++;
+    }
+    toast(`${n} elementos añadidos a la Agenda`);
+  }
+
+  async aiAsk() {
+    const r = await prompt('Preguntar a este cuaderno', [{ name: 'q', label: 'Tu pregunta', type: 'textarea', value: '' }], 'Preguntar');
+    if (!r || !r.q.trim()) return;
+    const text = await this.aiBusy(async () => AI.ask([{ text: AI.P.question(r.q.trim()) }, ...await this.pageParts(true)]));
+    if (text) this.aiResult('Respuesta', text);
+  }
+
+  async aiTranslate() {
+    const r = await prompt('Traducir esta página', [{ name: 'l', label: 'Idioma', type: 'select', value: 'inglés', options: ['inglés', 'francés', 'alemán', 'italiano', 'portugués', 'catalán'].map(x => ({ value: x, label: x })) }], 'Traducir');
+    if (!r) return;
+    const text = await this.aiBusy(async () => AI.ask([{ text: AI.P.translate(r.l) }, ...await this.pageParts(false)]));
+    if (text) this.aiResult('Traducción', text);
+  }
+
+  async aiMeeting() {
+    const recs = (await Promise.all((this.nb.recs || []).map(id => db.get('blobs', id)))).filter(Boolean);
+    if (!recs.length) return toast('Esta reunión no tiene grabaciones');
+    let rec = recs[recs.length - 1];
+    if (recs.length > 1) {
+      const r = await prompt('¿Qué grabación?', [{ name: 'i', label: 'Grabación', type: 'select', value: String(recs.length - 1), options: recs.map((x, i) => ({ value: String(i), label: `Grabación ${i + 1} · ${fmtDur(x.dur)}` })) }], 'Resumir');
+      if (!r) return;
+      rec = recs[+r.i];
+    }
+    if (rec.data.size > 18 * 1024 * 1024) return toast('La grabación es demasiado larga para enviarla a Gemini (máx. ~18 MB).', 5000);
+    const text = await this.aiBusy(async () => AI.ask([{ text: AI.P.meeting }, await AI.blobPart(rec.data)]));
+    if (text) this.aiResult('Resumen de la reunión', text);
   }
 
   paste() {
@@ -766,6 +889,7 @@ export class Editor {
       case 'undo': this.doUndo(); break;
       case 'redo': this.doRedo(); break;
       case 'image': this.insertImages(); break;
+      case 'ai': this.aiMenu(btn); break;
       case 'layers': this.layersPop(btn); break;
       case 'tpl': this.tplPop(btn); break;
       case 'pages': this.pagesView(); break;

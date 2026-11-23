@@ -11,6 +11,7 @@ import { notebookPDF, safeName } from './render.js';
 import { hooks as dbHooks } from './db.js';
 import * as G from './google.js';
 import * as sync from './sync.js';
+import * as AI from './ai.js';
 
 const app = document.getElementById('app');
 let editor = null, timer = null, installEvt = null;
@@ -482,12 +483,18 @@ VIEWS.ajustes = async v => {
     ${tog('gTasks', 'Tareas ↔ Google Tasks', 'Las tareas van a una lista llamada «Cuaderno», en los dos sentidos.')}
     <details class="set gid"><summary class="tx">ID de cliente de Google<small>${G.clientId() ? 'Configurado: …' + esc(G.clientId().slice(-34)) : 'Falta configurarlo (ver guía de registro).'}</small></summary>
       <div class="row" style="width:100%;margin-top:10px"><input class="gcid" placeholder="xxxxxxxx.apps.googleusercontent.com" value="${esc(settings.gClientId)}" style="flex:1;padding:10px;border:1.5px solid var(--line2);border-radius:10px;background:var(--paper);color:var(--ink)"><button class="btn sm gsave">Guardar</button></div></details>
+    <h2>Inteligencia artificial (Gemini)</h2>
+    <div class="set"><div class="tx">Clave de Gemini<small>${settings.aiKey ? 'Configurada en esta tablet.' : 'Créala gratis en Google AI Studio con tu cuenta y pégala aquí.'} Se guarda solo en esta tablet. Al usar la IA, la página o el audio se envían a Google; en la modalidad gratuita Google puede usarlos para mejorar sus productos.</small>
+      <div class="row" style="margin-top:10px"><input class="aikey" type="password" placeholder="Pega aquí la clave (AIza…)" value="${esc(settings.aiKey)}" style="flex:1;min-width:220px;padding:10px;border:1.5px solid var(--line2);border-radius:10px;background:var(--paper);color:var(--ink)">
+      <button class="btn sm aisave">Guardar</button><button class="btn sm ghost aitest">Probar</button></div>
+      <a class="btn sm ghost" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="margin-top:10px">${icon('spark')} Crear clave en Google AI Studio</a></div></div>
+    <div class="set"><div class="tx">Cómo se usa<small>En cualquier cuaderno: botón ${icon('spark', 'inl')} de la barra (pasar a texto, pasar a limpio, resumir, sacar citas y tareas, preguntar, traducir, resumir grabaciones) o rodea algo con el lazo y pulsa «A texto».</small></div></div>
     <h2>Datos</h2>
     <div class="set"><div class="tx">Almacenamiento<small>${est || 'Todo se guarda solo en esta tablet, en el navegador.'} ${persisted ? '· protegido contra borrado automático' : ''}</small></div></div>
     <div class="set"><div class="tx">Copia de seguridad<small>Descarga un archivo con todos tus cuadernos, agenda y audios. Guárdalo en Drive de vez en cuando.</small></div><button class="btn sm exp">${icon('download')} Exportar</button><button class="btn sm ghost imp">${icon('upload')} Restaurar</button></div>
     ${installEvt ? `<div class="set"><div class="tx">Instalar la app<small>Añade Cuaderno a la pantalla de inicio de la tablet.</small></div><button class="btn sm pri inst">Instalar</button></div>` : ''}
     <div class="set"><div class="tx">Borrar todo<small>Elimina todos los datos de esta app en esta tablet.</small></div><button class="btn sm danger wipe">${icon('trash')} Borrar</button></div>
-    <p class="sub" style="margin-top:24px">Cuaderno · app web sin conexión, sin cuentas y sin IA. Tus datos no salen de la tablet.</p>`;
+    <p class="sub" style="margin-top:24px">Cuaderno · app web que funciona sin conexión. Tus datos se quedan en la tablet (y en tu Drive si sincronizas); la IA solo envía a Google lo que le pidas.</p>`;
   v.querySelectorAll('.sw-toggle').forEach(b => b.onclick = () => { settings[b.dataset.k] = !settings[b.dataset.k]; saveSettings(); b.classList.toggle('on'); });
   v.querySelectorAll('.seg[data-k]').forEach(s => s.onclick = e => { const b = e.target.closest('[data-v]'); if (!b) return; settings[s.dataset.k] = b.dataset.v; saveSettings(); s.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); });
   G.prepare().catch(() => {});
@@ -497,6 +504,13 @@ VIEWS.ajustes = async v => {
     if (!await confirm('¿Desconectar de Google en esta tablet?', 'Desconectar', 'Tus datos se quedan en la tablet y en Drive; solo deja de sincronizar.')) return;
     G.signOut(); sync.refreshState(); paintCloud(); route();
   });
+  v.querySelector('.aisave').onclick = () => { settings.aiKey = v.querySelector('.aikey').value.trim(); saveSettings(); toast(settings.aiKey ? 'Clave de Gemini guardada' : 'Clave quitada'); };
+  v.querySelector('.aitest').onclick = async () => {
+    settings.aiKey = v.querySelector('.aikey').value.trim(); saveSettings();
+    const t = toast('Probando Gemini…', 60000);
+    try { const r = await AI.ask([{ text: 'Responde solo con la palabra: Funciona' }]); toast('Gemini responde: ' + r.slice(0, 60), 4000); }
+    catch (e) { toast(e.message, 6000); } finally { t.remove(); }
+  };
   v.querySelector('.gsave').onclick = () => {
     settings.gClientId = v.querySelector('.gcid').value.trim(); saveSettings();
     G.prepare().catch(() => {}); toast('ID de cliente guardado'); route();
