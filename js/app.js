@@ -534,7 +534,16 @@ addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = 
 (async () => {
   await loadSettings();
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
-  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(e => console.warn(e));
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    // Cuando llega una versión nueva, la app se recarga sola (fuera del editor, para no perder nada).
+    const hadCtrl = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadCtrl) return;
+      if (!editor) location.reload();
+      else addEventListener('hashchange', () => location.reload(), { once: true });
+    });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(e => console.warn(e));
+  }
   if (!location.hash) history.replaceState(null, '', '#/home');
   route();
   sync.refreshState(); paintCloud();
