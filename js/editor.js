@@ -7,6 +7,7 @@ import { settings, saveSettings } from './settings.js';
 import { h, icon, esc, pop, menu, modal, prompt, confirm, toast, flash, pickFiles, download, shareOrDownload, dkey, fmtDate, fmtDur, closePop } from './ui.js';
 import * as store from './store.js';
 import { drawBackground, pagePNG, notebookPDF, pageCanvas, safeName } from './render.js';
+import { hooks as syncHooks, onSync } from './sync.js';
 
 let CLIP = null; // portapapeles compartido entre cuadernos
 const GRAYS = ['#141414', '#4a4a4a', '#7a7a7a', '#a8a8a8', '#ffffff'];
@@ -86,12 +87,35 @@ export class Editor {
     this.onKey = e => this.key(e);
     addEventListener('keydown', this.onKey);
     this.setupExtra();
+    syncHooks.before = () => this.flushSave();
+    this.offSync = onSync((s, ch) => this.remoteChanged(ch));
     await this.loadPage(this.idx, false);
     this.updTools();
     store.touchRecent(this.nb.id);
   }
 
+  // Cambios que llegan de otra tablet o de Google mientras el cuaderno está abierto.
+  async remoteChanged(ch) {
+    if (!ch || !ch.size || !this.el.isConnected) return;
+    if (ch.has('notebooks/' + this.nb.id)) {
+      const fresh = await db.get('notebooks', this.nb.id);
+      if (!fresh) { toast('Este cuaderno se eliminó en otra tablet'); location.hash = '#/home'; return; }
+      const curId = this.nb.pages[this.idx];
+      this.nb = fresh;
+      const i = fresh.pages.indexOf(curId);
+      if (i < 0) { await this.loadPage(Math.min(this.idx, fresh.pages.length - 1), false); return; }
+      this.idx = i;
+      this.updTop();
+    }
+    if (this.page && ch.has('pages/' + this.page.id) && !this.saveT && !this.act && !this.editingText) {
+      const p = await db.get('pages', this.page.id);
+      if (p) { this.page = p; this.undo = []; this.redo = []; this.sel = null; await this.renderBg(); this.renderInk(); this.drawSel(); this.updTop(); }
+    }
+  }
+
   async destroy() {
+    this.offSync?.();
+    if (syncHooks.before) syncHooks.before = null;
     this.ro?.disconnect();
     removeEventListener('keydown', this.onKey);
     if (this.editingText) this.editingText();

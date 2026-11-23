@@ -1,11 +1,14 @@
 // Service worker: la app funciona sin conexión una vez abierta la primera vez.
-const V = 'cuaderno-v1';
+const V = 'cuaderno-v2';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/db.js', 'js/ui.js', 'js/icons.js', 'js/settings.js', 'js/store.js',
   'js/ink.js', 'js/templates.js', 'js/render.js', 'js/pdf.js', 'js/editor.js',
+  'js/google.js', 'js/sync.js',
   'icons/icon-192.png', 'icons/icon-512.png'
 ];
+// Solo se guardan copias de la propia app y de sus librerías; nunca de las APIs de Google.
+const CACHE_HOSTS = ['cdnjs.cloudflare.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(V).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -20,6 +23,8 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET' || !req.url.startsWith('http')) return;
+  const url = new URL(req.url);
+  if (url.origin !== self.location.origin && !CACHE_HOSTS.includes(url.hostname)) return;
   e.respondWith(caches.open(V).then(async cache => {
     const hit = await cache.match(req, { ignoreSearch: req.mode === 'navigate' });
     const net = fetch(req).then(res => {

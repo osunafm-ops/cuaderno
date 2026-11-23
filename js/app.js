@@ -8,6 +8,9 @@ import { TEMPLATES, drawTemplate } from './templates.js';
 import { W, H } from './ink.js';
 import { getDoc, pdfBitmap, fitRect } from './pdf.js';
 import { notebookPDF, safeName } from './render.js';
+import { hooks as dbHooks } from './db.js';
+import * as G from './google.js';
+import * as sync from './sync.js';
 
 const app = document.getElementById('app');
 let editor = null, timer = null, installEvt = null;
@@ -29,6 +32,7 @@ app.innerHTML = `<div class="shell" id="main">
     <button data-b="back" title="Atrás">${icon('back')}</button>
     <button data-b="home" title="Inicio (mantén pulsado: recientes)">${icon('home')}</button>
     <button data-b="memo" title="Nota rápida">${icon('note')}</button>
+    <button class="cloud" data-b="sync" title="Sincronización con Google" hidden>${icon('cloud')}<span></span></button>
   </div>`;
 const main = document.getElementById('main'), edroot = document.getElementById('edroot'), view = document.getElementById('view');
 
@@ -47,6 +51,46 @@ bez.addEventListener('click', async e => {
   if (b.dataset.b === 'back') history.length > 1 ? history.back() : go('#/home');
   if (b.dataset.b === 'home' && !lpFired) go('#/home');
   if (b.dataset.b === 'memo') quickMemo();
+  if (b.dataset.b === 'sync') cloudTap();
+});
+
+// ---------------- sincronización con Google ----------------
+async function connectGoogle() {
+  try {
+    await G.signIn();
+    toast('Conectado con Google. Sincronizando…');
+    await sync.syncNow();
+    if (sync.state.status === 'ok') toast('Sincronizado');
+  } catch (e) { toast(e.message || 'No se pudo conectar', 5000); sync.refreshState(); }
+}
+async function cloudTap() {
+  if (!settings.gConnected) return go('#/ajustes');
+  if (!G.hasToken()) return connectGoogle();
+  await sync.syncNow();
+  const s = sync.state;
+  toast(s.status === 'ok' ? 'Sincronizado' : s.status === 'error' ? 'Error: ' + s.msg : 'Hay que volver a conectar', s.status === 'error' ? 6000 : 2400);
+}
+function paintCloud() {
+  const b = bez.querySelector('.cloud'), s = sync.state;
+  b.hidden = !settings.gConnected;
+  b.className = 'cloud ' + s.status;
+  b.querySelector('span').textContent =
+    s.status === 'busy' ? 'Sincronizando…' : s.status === 'auth' ? 'Toca para sincronizar' : s.status === 'error' ? 'Error · reintentar' :
+    s.last ? 'Sincronizado ' + fmtTime(s.last) : 'Sincronizar';
+}
+sync.onSync((s, changed) => {
+  paintCloud();
+  if (changed && changed.size && !editor && !document.querySelector('.modal-bg,.pop') && !main.hidden && !(document.activeElement && document.activeElement.matches('input,textarea'))) route();
+});
+let syncT = null;
+dbHooks.change = () => {
+  if (!settings.gConnected || !G.hasToken()) return;
+  clearTimeout(syncT);
+  syncT = setTimeout(() => sync.syncNow(), 15000);
+};
+setInterval(() => { if (settings.gConnected && G.hasToken()) sync.syncNow(); else if (settings.gConnected) sync.refreshState(); }, 180000);
+document.addEventListener('visibilitychange', () => {
+  if (settings.gConnected && G.hasToken()) { if (document.visibilityState === 'visible') sync.syncNow(); else if (syncT) { clearTimeout(syncT); sync.syncNow(); } }
 });
 
 async function recentsMenu(anchor) {
@@ -263,7 +307,7 @@ VIEWS.agenda = async (v, a) => {
         <button class="btn pri page">${icon('pen')} ${daily ? 'Abrir página del día' : 'Escribir página del día'}</button>
         ${daily?.cover ? `<img class="dthumb page" src="${daily.cover}" alt="">` : ''}
         <h3 class="row">Eventos<div class="grow"></div><button class="btn sm ghost addev">${icon('plus')} Evento</button></h3>
-        <div class="list">${dEv.map(e => `<div class="li" data-ev="${e.id}"><b>${esc(e.time || '—')}</b><span class="tx">${esc(e.title || '')}</span>${e.img ? `<img src="${e.img}" alt="">` : ''}<div class="grow"></div><button class="ib del">${icon('trash')}</button></div>`).join('') || '<div class="li sub">Sin eventos</div>'}</div>
+        <div class="list">${dEv.map(e => `<div class="li" data-ev="${e.id}"><b class="edit">${esc(e.time || 'Todo el día')}</b><span class="tx edit">${esc(e.title || '')}${e.rec ? ' ' + icon('repeat', 'inl') : ''}</span>${e.img ? `<img src="${e.img}" alt="">` : ''}<div class="grow"></div><button class="ib del">${icon('trash')}</button></div>`).join('') || '<div class="li sub">Sin eventos</div>'}</div>
         <h3 class="row">Tareas<div class="grow"></div><button class="btn sm ghost addtd">${icon('plus')} Tarea</button></h3>
         <div class="list">${dTd.map(t => `<div class="li ${t.done ? 'done' : ''}" data-td="${t.id}"><button class="chk">${t.done ? icon('check') : ''}</button><span class="tx">${esc(t.text || '')}</span>${t.img ? `<img src="${t.img}" alt="">` : ''}<div class="grow"></div><button class="ib del">${icon('trash')}</button></div>`).join('') || '<div class="li sub">Sin tareas</div>'}</div>
         <p class="sub">Consejo: en cualquier cuaderno, rodea lo escrito con el <b>lazo</b> y pulsa «Evento» o «Tarea» para traerlo aquí con tu letra.</p>
@@ -284,6 +328,19 @@ VIEWS.agenda = async (v, a) => {
     const r = await prompt('Nueva tarea', [{ name: 'text', label: 'Tarea', value: '' }], 'Añadir');
     if (r && r.text.trim()) { await db.put('todos', { id: uid(), date: calSel, text: r.text.trim(), done: false }); route(); }
   };
+  v.querySelectorAll('[data-ev] .edit').forEach(b => b.onclick = async () => {
+    const e = dEv.find(x => x.id === b.closest('[data-ev]').dataset.ev);
+    const r = await prompt('Editar evento', [
+      { name: 'date', label: 'Fecha', type: 'date', value: e.date },
+      { name: 'time', label: 'Hora (vacío = todo el día)', type: 'time', value: e.time },
+      { name: 'title', label: 'Título', value: e.title || '' }], 'Guardar');
+    if (r && r.date) { Object.assign(e, { date: r.date, time: r.time, title: r.title }); await db.put('events', e); calSel = r.date; calM = r.date.slice(0, 7); route(); }
+  });
+  v.querySelectorAll('[data-td] .tx').forEach(b => b.onclick = async () => {
+    const t = dTd.find(x => x.id === b.closest('[data-td]').dataset.td);
+    const r = await prompt('Editar tarea', [{ name: 'date', label: 'Fecha', type: 'date', value: t.date }, { name: 'text', label: 'Tarea', value: t.text || '' }], 'Guardar');
+    if (r && r.date) { Object.assign(t, { date: r.date, text: r.text.trim() }); await db.put('todos', t); route(); }
+  });
   v.querySelectorAll('[data-ev] .del').forEach(b => b.onclick = async () => { if (await confirm('¿Eliminar este evento?', 'Eliminar')) { await db.del('events', b.closest('[data-ev]').dataset.ev); route(); } });
   v.querySelectorAll('[data-td] .del').forEach(b => b.onclick = async () => { if (await confirm('¿Eliminar esta tarea?', 'Eliminar')) { await db.del('todos', b.closest('[data-td]').dataset.td); route(); } });
   v.querySelectorAll('[data-td] .chk').forEach(b => b.onclick = async () => { const t = dTd.find(x => x.id === b.closest('[data-td]').dataset.td); t.done = !t.done; await db.put('todos', t); route(); });
@@ -415,6 +472,16 @@ VIEWS.ajustes = async v => {
     ${tog('dark', 'Modo oscuro', 'Invierte los colores para leer de noche.')}
     ${tog('color', 'Tinta en color', 'Añade colores a los lápices (la tableta original solo tiene grises).')}
     ${seg('refresh', 'Efecto de refresco', '«Tinta» simula el parpadeo de una pantalla E Ink al cambiar de página.', [['fast', 'Rápido'], ['best', 'Tinta']])}
+    <h2>Sincronización con Google</h2>
+    <div class="set"><div class="tx">Estado<small>${settings.gConnected
+      ? `Conectado · ${sync.state.status === 'error' ? 'último error: ' + esc(sync.state.msg) : settings.gLast ? 'última sincronización ' + fmtDate(settings.gLast, { day: 'numeric', month: 'short' }) + ' ' + fmtTime(settings.gLast) : 'aún sin sincronizar'}`
+      : 'Sin conectar. Conecta la misma cuenta de Google en cada tablet para ver lo mismo en todas.'}</small></div>
+      ${settings.gConnected ? `<button class="btn sm pri gsync">${icon('cloud')} Sincronizar ahora</button><button class="btn sm ghost gout">Desconectar</button>` : `<button class="btn sm pri gin">${icon('cloud')} Conectar con Google</button>`}</div>
+    ${tog('gDrive', 'Cuadernos entre tablets', 'Guarda cuadernos, notas, PDF y audios en la carpeta «Cuaderno (sincronización)» de tu Google Drive.')}
+    ${tog('gCal', 'Agenda ↔ Google Calendar', 'Los eventos van a un calendario propio llamado «Cuaderno», en los dos sentidos.')}
+    ${tog('gTasks', 'Tareas ↔ Google Tasks', 'Las tareas van a una lista llamada «Cuaderno», en los dos sentidos.')}
+    <details class="set gid"><summary class="tx">ID de cliente de Google<small>${G.clientId() ? 'Configurado: …' + esc(G.clientId().slice(-34)) : 'Falta configurarlo (ver guía de registro).'}</small></summary>
+      <div class="row" style="width:100%;margin-top:10px"><input class="gcid" placeholder="xxxxxxxx.apps.googleusercontent.com" value="${esc(settings.gClientId)}" style="flex:1;padding:10px;border:1.5px solid var(--line2);border-radius:10px;background:var(--paper);color:var(--ink)"><button class="btn sm gsave">Guardar</button></div></details>
     <h2>Datos</h2>
     <div class="set"><div class="tx">Almacenamiento<small>${est || 'Todo se guarda solo en esta tablet, en el navegador.'} ${persisted ? '· protegido contra borrado automático' : ''}</small></div></div>
     <div class="set"><div class="tx">Copia de seguridad<small>Descarga un archivo con todos tus cuadernos, agenda y audios. Guárdalo en Drive de vez en cuando.</small></div><button class="btn sm exp">${icon('download')} Exportar</button><button class="btn sm ghost imp">${icon('upload')} Restaurar</button></div>
@@ -423,6 +490,17 @@ VIEWS.ajustes = async v => {
     <p class="sub" style="margin-top:24px">Cuaderno · app web sin conexión, sin cuentas y sin IA. Tus datos no salen de la tablet.</p>`;
   v.querySelectorAll('.sw-toggle').forEach(b => b.onclick = () => { settings[b.dataset.k] = !settings[b.dataset.k]; saveSettings(); b.classList.toggle('on'); });
   v.querySelectorAll('.seg[data-k]').forEach(s => s.onclick = e => { const b = e.target.closest('[data-v]'); if (!b) return; settings[s.dataset.k] = b.dataset.v; saveSettings(); s.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); });
+  G.prepare().catch(() => {});
+  v.querySelector('.gin')?.addEventListener('click', async () => { await connectGoogle(); route(); });
+  v.querySelector('.gsync')?.addEventListener('click', async () => { await cloudTap(); route(); });
+  v.querySelector('.gout')?.addEventListener('click', async () => {
+    if (!await confirm('¿Desconectar de Google en esta tablet?', 'Desconectar', 'Tus datos se quedan en la tablet y en Drive; solo deja de sincronizar.')) return;
+    G.signOut(); sync.refreshState(); paintCloud(); route();
+  });
+  v.querySelector('.gsave').onclick = () => {
+    settings.gClientId = v.querySelector('.gcid').value.trim(); saveSettings();
+    G.prepare().catch(() => {}); toast('ID de cliente guardado'); route();
+  };
   v.querySelector('.exp').onclick = async () => { const t = toast('Preparando copia…', 60000); try { download(await store.exportAll(), `cuaderno-copia-${dkey()}.json`); } finally { t.remove(); } };
   v.querySelector('.imp').onclick = async () => {
     const [f] = await pickFiles('application/json,.json'); if (!f) return;
@@ -445,4 +523,6 @@ addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = 
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(e => console.warn(e));
   if (!location.hash) history.replaceState(null, '', '#/home');
   route();
+  sync.refreshState(); paintCloud();
+  if (settings.gConnected) { G.prepare().catch(() => {}); if (G.hasToken()) sync.syncNow(); }
 })();

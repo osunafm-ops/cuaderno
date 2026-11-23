@@ -17,7 +17,16 @@ export const settings = {
   textSize: 36,
   defaultTpl: 'rayas',
   pens: [{ b: 'pluma', w: 2.5, c: '#141414' }, { b: 'fino', w: 1.5, c: '#141414' }],
-  hl: { w: 8, c: '#9a9a9a' }
+  hl: { w: 8, c: '#9a9a9a' },
+  // Sincronización con Google
+  gClientId: '',
+  gConnected: false,
+  gDrive: true,
+  gCal: true,
+  gTasks: true,
+  gScopes: [],
+  gFolder: null,
+  gLast: null
 };
 
 export const PAPER = { eink: '#f4f3ee', white: '#ffffff', cream: '#f7f1e3' };

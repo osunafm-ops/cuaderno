@@ -57,5 +57,7 @@ export const ICONS = {
   task: 'M4 4h16v16H4zM8 12l3 3 5-6',
   dup: 'M8 8h12v12H8zM4 16V4h12M14 11v6M11 14h6',
   moveLayer: 'M12 3l9 5-9 5-9-5zM12 13v8M9 18l3 3 3-3',
-  grid: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z'
+  grid: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
+  cloud: 'M7 18h10.5a4 4 0 0 0 .4-7.98A6 6 0 0 0 6.2 9.6 4.3 4.3 0 0 0 7 18z',
+  repeat: 'M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4'
 };
