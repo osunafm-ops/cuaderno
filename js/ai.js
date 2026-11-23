@@ -11,40 +11,55 @@ export const dataUrlPart = url => { const [h, d] = url.split(','); return { inli
 export const canvasPart = (c, q = 0.8) => dataUrlPart(c.toDataURL('image/jpeg', q));
 export const blobPart = async b => ({ inline_data: { mime_type: (b.type || 'audio/webm').split(';')[0], data: await toB64(b) } });
 
-let chosen = null;
-async function model() {
-  if (settings.aiModel) return settings.aiModel;
-  if (chosen) return chosen;
-  // Busca el modelo "Flash" más reciente disponible para tu clave.
-  try {
-    const r = await fetch(`${BASE}/models?pageSize=200`, { headers: { 'x-goog-api-key': settings.aiKey.trim() } });
-    if (r.ok) {
-      const list = ((await r.json()).models || [])
-        .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
-        .map(m => m.name.replace('models/', ''))
-        .filter(n => /flash/.test(n) && !/lite|image|tts|live|audio|embed|preview|exp|thinking/.test(n));
-      if (list.includes('gemini-flash-latest')) chosen = 'gemini-flash-latest';
-      else if (list.length) chosen = list.sort((a, b) => b.localeCompare(a, 'en', { numeric: true }))[0];
-    }
-  } catch (e) { /* se usa el alias */ }
-  return chosen || 'gemini-flash-latest';
+let models = null, good = null;
+// Lista de modelos a probar, en orden: el que funcionó la última vez, Flash más recientes y, de reserva, los "Lite".
+async function candidates() {
+  if (settings.aiModel) return [settings.aiModel];
+  if (!models) {
+    let flash = [], lite = [];
+    try {
+      const r = await fetch(`${BASE}/models?pageSize=200`, { headers: { 'x-goog-api-key': settings.aiKey.trim() } });
+      if (r.ok) {
+        const names = ((await r.json()).models || [])
+          .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+          .map(m => m.name.replace('models/', ''))
+          .filter(n => /flash/.test(n) && !/image|tts|live|audio|embed|exp|thinking|preview/.test(n));
+        const byNew = (a, b) => b.localeCompare(a, 'en', { numeric: true });
+        flash = names.filter(n => !/lite/.test(n)).sort(byNew).slice(0, 3);
+        lite = names.filter(n => /lite/.test(n)).sort(byNew).slice(0, 2);
+      }
+    } catch (e) { /* se usan los alias */ }
+    models = [...new Set(['gemini-flash-latest', ...flash, 'gemini-flash-lite-latest', ...lite])];
+  }
+  return good ? [good, ...models.filter(m => m !== good)] : models;
 }
+
+const wait = ms => new Promise(r => setTimeout(r, ms));
 
 export async function ask(parts, { json = false } = {}) {
   if (!hasKey()) throw new Error('Falta la clave de Gemini (Ajustes → Inteligencia artificial).');
-  const m = await model();
-  const body = { contents: [{ role: 'user', parts }], generationConfig: { temperature: 0.2, ...(json ? { responseMimeType: 'application/json' } : {}) } };
-  let r;
-  try {
-    r = await fetch(`${BASE}/models/${m}:generateContent`, { method: 'POST', headers: { 'x-goog-api-key': settings.aiKey.trim(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  } catch (e) { throw new Error('Sin conexión a internet: la IA necesita conexión.'); }
-  if (!r.ok) {
-    let msg = ''; try { msg = (await r.json()).error?.message || ''; } catch (e) {}
-    if (r.status === 429) throw new Error('Has llegado al límite gratuito de Gemini por ahora. Prueba más tarde.');
-    if (r.status === 400 && /API key/i.test(msg)) throw new Error('La clave de Gemini no es válida. Revísala en Ajustes.');
-    if (r.status === 403) throw new Error('La clave de Gemini no tiene permiso. Revísala en Ajustes.');
-    if (r.status === 404) { chosen = null; throw new Error('Modelo de Gemini no disponible (' + m + ').'); }
-    throw new Error(`Gemini respondió ${r.status}: ${msg.slice(0, 160)}`);
+  const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0.2, ...(json ? { responseMimeType: 'application/json' } : {}) } });
+  let r = null, busy = false, limit = false;
+  outer:
+  for (const m of await candidates()) {
+    for (let tryN = 0; tryN < 2; tryN++) {
+      try {
+        r = await fetch(`${BASE}/models/${m}:generateContent`, { method: 'POST', headers: { 'x-goog-api-key': settings.aiKey.trim(), 'Content-Type': 'application/json' }, body });
+      } catch (e) { throw new Error('Sin conexión a internet: la IA necesita conexión.'); }
+      if (r.ok) { good = m; break outer; }
+      let msg = ''; try { msg = (await r.clone().json()).error?.message || ''; } catch (e) {}
+      if (r.status === 400 && /API key/i.test(msg)) throw new Error('La clave de Gemini no es válida. Revísala en Ajustes.');
+      if (r.status === 403) throw new Error('La clave de Gemini no tiene permiso. Revísala en Ajustes.');
+      if (r.status === 503 || r.status === 500) { busy = true; if (tryN === 0) { await wait(2000); continue; } }
+      if (r.status === 429) limit = true;
+      if ([404, 429, 500, 503].includes(r.status)) { if (good === m) good = null; continue outer; } // probar otro modelo
+      throw new Error(`Gemini respondió ${r.status}: ${msg.slice(0, 160)}`);
+    }
+  }
+  if (!r || !r.ok) {
+    if (busy) throw new Error('Gemini está saturado en este momento (pasa a veces). Vuelve a intentarlo en unos minutos.');
+    if (limit) throw new Error('Has llegado al límite gratuito de Gemini por ahora. Prueba más tarde.');
+    throw new Error('No hay ningún modelo de Gemini disponible para tu clave.');
   }
   const j = await r.json();
   const text = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim();
