@@ -12,6 +12,7 @@ import { hooks as dbHooks } from './db.js';
 import * as G from './google.js';
 import * as sync from './sync.js';
 import * as AI from './ai.js';
+import * as FD from './folders.js';
 
 const app = document.getElementById('app');
 let editor = null, timer = null, installEvt = null;
@@ -160,10 +161,9 @@ function nbMenu(anchor, nb, refresh) {
       const r = await prompt('Renombrar', [{ name: 't', label: 'Nombre', value: nb.title }]);
       if (r && r.t.trim()) { nb.title = r.t.trim(); await db.put('notebooks', nb); refresh(); }
     } },
-    nb.kind === 'paper' && { icon: 'folder', label: 'Mover a carpeta', run: async () => {
-      const folders = [...new Set((await db.all('notebooks')).map(n => n.folder).filter(Boolean))];
-      const r = await prompt('Carpeta', [{ name: 'f', label: 'Nombre de carpeta (vacío = sin carpeta)', value: nb.folder, list: folders }]);
-      if (r) { nb.folder = r.f.trim(); await db.put('notebooks', nb); refresh(); }
+    nb.kind !== 'daily' && { icon: 'move', label: 'Mover a carpeta', run: async () => {
+      const to = await FD.pickFolder(`Mover «${nb.title}» a…`, { current: nb.parent || '' });
+      if (to !== null && await FD.moveTo(nb, to)) { toast('Movido'); refresh(); }
     } },
     nb.kind === 'paper' && { icon: 'tag', label: 'Etiquetas', run: async () => {
       const r = await prompt('Etiquetas', [{ name: 't', label: 'Separadas por comas', value: (nb.tags || []).join(', ') }]);
@@ -244,41 +244,117 @@ VIEWS.home = async v => {
   navigator.getBattery?.().then(b => { const el = v.querySelector('.bat'); if (el) el.textContent = `Batería ${Math.round(b.level * 100)} %${b.charging ? ' · cargando' : ''}`; }).catch(() => {});
 };
 
-const F = { folder: '', tag: '', q: '', sort: 'updated' };
-VIEWS.papel = async v => {
-  const all = (await db.all('notebooks')).filter(n => n.kind === 'paper');
-  const folders = [...new Set(all.map(n => n.folder).filter(Boolean))].sort();
-  const tags = [...new Set(all.flatMap(n => n.tags || []))].sort();
-  let list = all.filter(n => (!F.folder || n.folder === F.folder) && (!F.tag || (n.tags || []).includes(F.tag)) && (!F.q || n.title.toLowerCase().includes(F.q.toLowerCase())));
-  list.sort((a, b) => F.sort === 'name' ? a.title.localeCompare(b.title) : F.sort === 'created' ? b.created - a.created : b.updated - a.updated);
-  v.innerHTML = `<div class="row head"><h1>Cuadernos</h1><div class="grow"></div>
-      <label class="search">${icon('search')}<input placeholder="Buscar por nombre" value="${esc(F.q)}"></label>
-      <div class="seg sort"><button data-s="updated">Recientes</button><button data-s="created">Creación</button><button data-s="name">A–Z</button></div>
-      <button class="btn pri new">${icon('plus')} Nuevo cuaderno</button></div>
-    <div class="row chips">${icon('folder')}<button class="chip ${!F.folder ? 'on' : ''}" data-f="">Todas</button>${folders.map(f => `<button class="chip ${F.folder === f ? 'on' : ''}" data-f="${esc(f)}">${esc(f)}</button>`).join('')}</div>
-    ${tags.length ? `<div class="row chips">${icon('tag')}<button class="chip ${!F.tag ? 'on' : ''}" data-g="">Todas</button>${tags.map(t => `<button class="chip ${F.tag === t ? 'on' : ''}" data-g="${esc(t)}">${esc(t)}</button>`).join('')}</div>` : ''}
-    ${list.length ? `<div class="covers">${list.map(n => cover(n, `${n.pages.length} pág. · ${fmtDate(n.updated)}`)).join('')}</div>` : empty('notebook', all.length ? 'Ningún cuaderno coincide' : 'Aún no tienes cuadernos', 'Pulsa «Nuevo cuaderno» y elige una plantilla.')}`;
+// ---- Cuadernos: explorador de carpetas en árbol ----
+const F = { tag: '', q: '', sort: 'updated', open: new Set() };
+const inFolders = n => !FD.isFolder(n) && n.kind !== 'daily';
+
+VIEWS.papel = async (v, cur = '') => {
+  await FD.migrate();
+  const allNb = await db.all('notebooks');
+  const folders = allNb.filter(FD.isFolder);
+  if (cur && !folders.find(f => f.id === cur)) cur = '';
+  const docs = allNb.filter(inFolders);
+  const path = FD.pathOf(cur, folders);
+  path.forEach(f => F.open.add(f.id));
+  const count = id => folders.filter(f => (f.parent || '') === id).length + docs.filter(d => (d.parent || '') === id).length;
+  const sorter = (a, b) => F.sort === 'name' ? a.title.localeCompare(b.title, 'es', { numeric: true }) : F.sort === 'created' ? b.created - a.created : b.updated - a.updated;
+  const tags = [...new Set(docs.flatMap(n => n.tags || []))].sort();
+  const q = F.q.trim().toLowerCase();
+  // En la raíz se ven los cuadernos; en cada carpeta, todo lo que se haya movido a ella.
+  const here = d => (d.parent || '') === cur && (cur || d.kind === 'paper');
+  let subf = q ? folders.filter(f => f.title.toLowerCase().includes(q)) : FD.childrenOf(cur, folders);
+  let list = docs.filter(d => (q ? (d.kind === 'paper' || d.parent) && d.title.toLowerCase().includes(q) : here(d)) && (!F.tag || (d.tags || []).includes(F.tag)));
+  list.sort(sorter);
+  if (F.sort !== 'name') subf = [...subf].sort(sorter);
+  const where = d => { const p = FD.pathOf(d.parent || '', folders); return p.length ? p.map(f => f.title).join(' › ') : 'Raíz'; };
+
+  const tree = (pid, depth) => FD.childrenOf(pid, folders).map(f => {
+    const kids = FD.childrenOf(f.id, folders).length, open = F.open.has(f.id);
+    return `<div class="trow ${f.id === cur ? 'on' : ''}" style="padding-left:${6 + depth * 16}px">
+        <button class="tcaret" data-tog="${f.id}" ${kids ? '' : 'disabled'}>${kids ? icon(open ? 'down' : 'right') : ''}</button>
+        <a href="#/papel/${f.id}">${icon(open && kids ? 'folderOpen' : 'folder')}<span>${esc(f.title)}</span></a><span class="tc">${count(f.id) || ''}</span></div>` +
+      (open ? tree(f.id, depth + 1) : '');
+  }).join('');
+
+  v.innerHTML = `<div class="explorer">
+    <aside class="ftree"><div class="trow root ${!cur ? 'on' : ''}"><a href="#/papel">${icon('home')}<span>Raíz</span></a><span class="tc">${count('') || ''}</span></div>
+      ${tree('', 1)}<button class="btn sm ghost tnew">${icon('folderPlus')} Nueva carpeta</button></aside>
+    <section class="fmain">
+      <div class="row head"><h1>${cur ? esc(path[path.length - 1].title) : 'Cuadernos'}</h1><div class="grow"></div>
+        <label class="search">${icon('search')}<input placeholder="Buscar en todas las carpetas" value="${esc(F.q)}"></label>
+        <div class="seg sort"><button data-s="updated">Recientes</button><button data-s="created">Creación</button><button data-s="name">A–Z</button></div></div>
+      <div class="row crumbs"><a href="#/papel" class="${!cur ? 'on' : ''}">${icon('home', 'inl')} Raíz</a>${path.map(f => `<span>›</span><a href="#/papel/${f.id}" class="${f.id === cur ? 'on' : ''}">${esc(f.title)}</a>`).join('')}
+        ${cur ? `<button class="ib cmore" title="Opciones de la carpeta">${icon('more')}</button>` : ''}<div class="grow"></div>
+        <button class="btn ghost nf">${icon('folderPlus')} Nueva carpeta</button><button class="btn pri new">${icon('plus')} Nuevo cuaderno</button></div>
+      ${tags.length ? `<div class="row chips">${icon('tag')}<button class="chip ${!F.tag ? 'on' : ''}" data-g="">Todas</button>${tags.map(t => `<button class="chip ${F.tag === t ? 'on' : ''}" data-g="${esc(t)}">${esc(t)}</button>`).join('')}</div>` : ''}
+      ${q ? `<p class="sub">Resultados para «${esc(F.q)}» en todas las carpetas</p>` : ''}
+      ${subf.length ? `<div class="fcards">${subf.map(f => `<div class="fcard" data-folder="${f.id}">${icon('folder')}<div class="ft"><b>${esc(f.title)}</b><span class="sub">${q ? esc(where(f)) : count(f.id) + ' elementos'}</span></div><button class="ib" data-fmore="${f.id}" title="Opciones">${icon('more')}</button></div>`).join('')}</div>` : ''}
+      ${list.length ? `<div class="covers">${list.map(n => cover(n, q ? where(n) : `${n.kind === 'paper' ? n.pages.length + ' pág.' : KIND_NAME[n.kind]} · ${fmtDate(n.updated)}`)).join('')}</div>`
+        : !subf.length ? empty(q ? 'search' : 'folder', q ? 'Nada coincide' : cur ? 'Carpeta vacía' : 'Aún no tienes cuadernos', q ? 'Prueba con otra palabra.' : 'Crea un cuaderno o una carpeta, o mueve aquí cualquier documento con su menú ⋯ → «Mover a carpeta».') : ''}
+    </section></div>`;
+
+  const refresh = () => route();
   v.querySelectorAll('.sort button').forEach(b => b.classList.toggle('on', b.dataset.s === F.sort));
   v.querySelector('.sort').onclick = e => { const b = e.target.closest('[data-s]'); if (b) { F.sort = b.dataset.s; route(); } };
   const inp = v.querySelector('.search input');
   let st; inp.oninput = () => { clearTimeout(st); st = setTimeout(() => { F.q = inp.value; route().then(() => { const i = view.querySelector('.search input'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }); }, 350); };
-  v.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { F.folder = b.dataset.f; route(); });
   v.querySelectorAll('[data-g]').forEach(b => b.onclick = () => { F.tag = b.dataset.g; route(); });
-  v.querySelector('.new').onclick = () => newNotebookDialog(folders);
-  const grid = v.querySelector('.covers'); if (grid) bindCovers(grid, list, () => route());
+  v.querySelectorAll('[data-tog]').forEach(b => b.onclick = () => { const id = b.dataset.tog; F.open.has(id) ? F.open.delete(id) : F.open.add(id); route(); });
+  const newF = async () => {
+    const r = await prompt('Nueva carpeta', [{ name: 't', label: cur ? `Dentro de «${path[path.length - 1].title}»` : 'En la raíz', value: '' }], 'Crear');
+    if (r && r.t.trim()) { await FD.newFolder(r.t.trim(), cur); F.open.add(cur); route(); }
+  };
+  v.querySelector('.nf').onclick = newF;
+  v.querySelector('.tnew').onclick = newF;
+  v.querySelector('.new').onclick = () => newNotebookDialog(cur);
+  v.querySelector('.cmore')?.addEventListener('click', e => folderMenu(e.currentTarget, path[path.length - 1], refresh));
+  const fc = v.querySelector('.fcards');
+  if (fc) fc.addEventListener('click', e => {
+    const m = e.target.closest('[data-fmore]');
+    if (m) { e.stopPropagation(); folderMenu(m, folders.find(f => f.id === m.dataset.fmore), refresh); return; }
+    const c = e.target.closest('[data-folder]');
+    if (c) { F.q = ''; go('#/papel/' + c.dataset.folder); }
+  });
+  const grid = v.querySelector('.covers'); if (grid) bindCovers(grid, list, refresh);
 };
 
-async function newNotebookDialog(folders) {
+function folderMenu(anchor, f, refresh) {
+  menu(anchor, [
+    { icon: 'folderOpen', label: 'Abrir', run: () => go('#/papel/' + f.id) },
+    { icon: 'folderPlus', label: 'Nueva subcarpeta', run: async () => {
+      const r = await prompt('Nueva subcarpeta', [{ name: 't', label: `Dentro de «${f.title}»`, value: '' }], 'Crear');
+      if (r && r.t.trim()) { await FD.newFolder(r.t.trim(), f.id); F.open.add(f.id); refresh(); }
+    } },
+    { icon: 'pen2', label: 'Renombrar', run: async () => {
+      const r = await prompt('Renombrar carpeta', [{ name: 't', label: 'Nombre', value: f.title }]);
+      if (r && r.t.trim()) { f.title = r.t.trim(); await db.put('notebooks', f); refresh(); }
+    } },
+    { icon: 'move', label: 'Mover a otra carpeta', run: async () => {
+      const to = await FD.pickFolder(`Mover «${f.title}» a…`, { current: f.parent || '', exclude: f.id });
+      if (to !== null && await FD.moveTo(f, to)) { toast('Carpeta movida'); refresh(); }
+    } },
+    { icon: 'trash', label: 'Eliminar carpeta', danger: true, run: async () => {
+      if (!await confirm(`¿Eliminar la carpeta «${f.title}»?`, 'Eliminar', 'No se borra nada de dentro: su contenido pasa a la carpeta superior.')) return;
+      const up = f.parent || '';
+      await FD.deleteFolder(f);
+      location.hash.includes(f.id) ? go(up ? '#/papel/' + up : '#/papel') : refresh();
+    } }
+  ]);
+}
+
+async function newNotebookDialog(parent = '') {
+  const folders = await FD.allFolders();
+  const p = FD.pathOf(parent, folders);
   const body = h(`<div><label class="field"><span>Nombre</span><input name="t" value="Cuaderno ${fmtDate(Date.now(), { day: 'numeric', month: 'short' })}"></label>
-    <label class="field"><span>Carpeta (opcional)</span><input name="f" list="dl-fold" value="${esc(F.folder)}"><datalist id="dl-fold">${folders.map(f => `<option value="${esc(f)}">`).join('')}</datalist></label>
+    <p class="sub" style="margin:-4px 0 14px">${icon('folder', 'inl')} Se guardará en: <b>${p.length ? esc(p.map(f => f.title).join(' › ')) : 'Raíz'}</b></p>
     <div class="field"><span>Plantilla</span></div></div>`);
   const tp = tplPicker(settings.defaultTpl);
   body.append(tp);
   const r = await modal('Nuevo cuaderno', body, [{ label: 'Cancelar', value: null },
-    { label: 'Crear', pri: true, value: mb => ({ t: mb.querySelector('[name=t]').value.trim() || 'Cuaderno', f: mb.querySelector('[name=f]').value.trim(), tpl: tp.dataset.sel }) }], { wide: true });
+    { label: 'Crear', pri: true, value: mb => ({ t: mb.querySelector('[name=t]').value.trim() || 'Cuaderno', tpl: tp.dataset.sel }) }], { wide: true });
   if (!r) return;
   settings.defaultTpl = r.tpl; saveSettings();
-  const nb = await store.newNotebook('paper', r.t, { tpl: r.tpl, folder: r.f });
+  const nb = await store.newNotebook('paper', r.t, { tpl: r.tpl, extra: { parent } });
   openNb(nb);
 }
 

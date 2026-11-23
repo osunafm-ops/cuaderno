@@ -9,6 +9,8 @@ import * as store from './store.js';
 import { drawBackground, pagePNG, notebookPDF, pageCanvas, safeName } from './render.js';
 import { hooks as syncHooks, onSync } from './sync.js';
 import * as AI from './ai.js';
+import * as RT from './richtext.js';
+import * as FD from './folders.js';
 
 let CLIP = null; // portapapeles compartido entre cuadernos
 const GRAYS = ['#141414', '#4a4a4a', '#7a7a7a', '#a8a8a8', '#ffffff'];
@@ -90,6 +92,10 @@ export class Editor {
     addEventListener('keydown', this.onKey);
     this.setupExtra();
     syncHooks.before = () => this.flushSave();
+    // Cuando terminan de cargar las letras (negrita, cursiva, «a mano»…), redibujar los textos.
+    this.onFonts = () => this.reqInk();
+    document.fonts?.addEventListener('loadingdone', this.onFonts);
+    for (const f of ['400 20px Caveat', '700 20px Literata', 'italic 400 20px Literata', '700 20px Inter']) document.fonts?.load(f).catch(() => {});
     this.offSync = onSync((s, ch) => this.remoteChanged(ch));
     await this.loadPage(this.idx, false);
     this.updTools();
@@ -117,6 +123,7 @@ export class Editor {
 
   async destroy() {
     this.offSync?.();
+    document.fonts?.removeEventListener('loadingdone', this.onFonts);
     if (syncHooks.before) syncHooks.before = null;
     this.ro?.disconnect();
     removeEventListener('keydown', this.onKey);
@@ -757,7 +764,7 @@ export class Editor {
     if (this.isLocked()) return toast('Página bloqueada');
     this.snap();
     const size = Math.min(settings.textSize, 32);
-    const o = { t: 'x', x: at.x, y: at.y, size, c: settings.pens[0].c, text: AI.wrap(text.trim(), size, W - at.x - 60) };
+    const o = { t: 'x', x: at.x, y: at.y, size, c: settings.pens[0].c, f: 'serif', w: Math.max(300, W - at.x - 60), text: text.trim(), paras: RT.fromPlain(text.trim()) };
     this.layer().objs.push(o);
     this.tool = 'lasso'; this.updTools();
     this.renderInk(); this.select([o]); this.dirty();
@@ -824,6 +831,7 @@ export class Editor {
   }
 
   // ---------------- texto e imágenes ----------------
+  // Texto con formato: se edita en un cuadro sobre la página con una barra de formato.
   textAt(p) {
     let hit = null;
     for (const L of this.page.layers) if (L.vis) for (const o of L.objs) if (o.t === 'x') {
@@ -833,33 +841,149 @@ export class Editor {
     this.snap();
     let o = hit;
     if (hit) this.removeObjs([hit]);
-    else o = { t: 'x', x: p.x, y: p.y - settings.textSize * 0.65, text: '', size: settings.textSize, c: settings.pens[0].c };
+    else o = { t: 'x', x: p.x, y: p.y - settings.textSize * 0.65, size: settings.textSize, c: settings.pens[0].c, f: 'serif', w: Math.min(900, Math.max(300, W - p.x - 40)), paras: [{ runs: [], align: 'left', list: null }] };
+    RT.normalize(o);
+    if (!o.w) o.w = Math.max(300, ink.bbox(o).w + 40);
     this.renderInk();
     const z = this.z;
-    const ta = h('<textarea class="txted" spellcheck="false" placeholder="Escribe…"></textarea>');
-    ta.value = o.text;
-    Object.assign(ta.style, { left: o.x * z + 'px', top: o.y * z + 'px', fontSize: o.size * z + 'px', color: o.c });
-    const grow = () => {
-      const b = ink.textBox({ ...o, text: ta.value || ' ' });
-      ta.style.width = Math.max(220, b.w * z + o.size * z) + 'px';
-      ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px';
+    const wrap = h('<div class="rtwrap"><div class="rte" contenteditable="true" spellcheck="true"></div><div class="rtw" title="Ancho del cuadro"></div></div>');
+    const ed = wrap.querySelector('.rte');
+    ed.innerHTML = RT.toHTML(o);
+    Object.assign(ed.style, { fontSize: o.size + 'px', color: o.c || '#141414', fontFamily: RT.FAM[o.f || 'serif'], transform: `scale(${z})` });
+    const place = () => {
+      ed.style.width = o.w + 'px';
+      Object.assign(wrap.style, { left: o.x * z + 'px', top: o.y * z + 'px', width: o.w * z + 'px', height: ed.offsetHeight * z + 'px' });
     };
-    ta.addEventListener('input', grow);
-    this.ovl.append(ta); grow();
-    setTimeout(() => ta.focus(), 30);
+    ed.addEventListener('input', place);
+    this.ovl.append(wrap); place();
+    wrap.querySelector('.rtw').addEventListener('pointerdown', e => {
+      e.preventDefault(); e.stopPropagation();
+      const hd = e.currentTarget, x0 = e.clientX, w0 = o.w;
+      hd.setPointerCapture(e.pointerId);
+      const mv = ev => { o.w = Math.max(120, Math.min(W - o.x, w0 + (ev.clientX - x0) / z)); place(); };
+      const up = () => { hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); };
+      hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up);
+    });
+    document.execCommand('styleWithCSS', false, true);
+    const bar = this.rtBar(ed, o, place);
+    setTimeout(() => {
+      ed.focus();
+      const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false);
+      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    }, 30);
     let done = false;
     const commit = () => {
       if (done) return; done = true;
       this.editingText = null;
-      o.text = ta.value.replace(/\s+$/, '');
-      ta.remove();
-      if (o.text) this.layer().objs.push(o);
+      o.paras = RT.fromDOM(ed);
+      o.text = RT.plain(o);
+      delete o.html;
+      bar.cleanup(); wrap.remove(); closePop();
+      if (o.text.trim()) this.layer().objs.push(o);
       else if (!hit) this.undo.pop();
       this.renderInk(); this.dirty();
     };
-    ta.addEventListener('blur', commit);
-    ta.addEventListener('keydown', e => { if (e.key === 'Escape') ta.blur(); e.stopPropagation(); });
+    ed.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); commit(); } e.stopPropagation(); });
     this.editingText = commit;
+  }
+
+  rtBar(ed, o, place) {
+    const bar = h(`<div class="rtbar">
+      <button data-c="pTitle" title="Título">Título</button><button data-c="pSub" title="Subtítulo">Subtítulo</button><button data-c="pNormal" title="Texto normal">Normal</button><span class="sep"></span>
+      <button data-c="bold" title="Negrita"><b>N</b></button><button data-c="italic" title="Cursiva"><i>K</i></button>
+      <button data-c="underline" title="Subrayado"><u>S</u></button><button data-c="strikeThrough" title="Tachado"><s>T</s></button><span class="sep"></span>
+      <button data-c="smaller" title="Letra más pequeña">A−</button><span class="szv"></span><button data-c="bigger" title="Letra más grande">A+</button>
+      <button data-c="font" title="Tipo de letra">Letra ▾</button>
+      <button data-c="color" title="Color del texto"><span class="cbar" style="border-bottom:4px solid #c62828">A</span> ▾</button>
+      <button data-c="hilite" title="Resaltar"><span style="background:#ffe066;padding:0 3px">ab</span> ▾</button><span class="sep"></span>
+      <button data-c="justifyLeft" title="Alinear a la izquierda">${icon('alignL')}</button><button data-c="justifyCenter" title="Centrar">${icon('alignC')}</button><button data-c="justifyRight" title="Alinear a la derecha">${icon('alignR')}</button>
+      <button data-c="insertUnorderedList" title="Lista con viñetas">${icon('listB')}</button><button data-c="insertOrderedList" title="Lista numerada">${icon('listN')}</button><span class="sep"></span>
+      <button data-c="clear" title="Quitar formato">${icon('x')}Formato</button>
+      <button class="ok" data-c="done" title="Terminar">${icon('check')} Hecho</button></div>`);
+    this.q('.ed-main').append(bar);
+    bar.addEventListener('pointerdown', e => { if (e.target.closest('button')) e.preventDefault(); });
+    const sel = () => getSelection();
+    const inEd = () => sel().rangeCount && ed.contains(sel().anchorNode);
+    const ensure = () => {
+      if (inEd()) return;
+      ed.focus();
+      const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false);
+      sel().removeAllRanges(); sel().addRange(r);
+    };
+    const blockOf = () => {
+      let n = sel().anchorNode;
+      while (n && n !== ed && !(n.nodeType === 1 && /^(DIV|P|LI)$/.test(n.tagName))) n = n.parentNode;
+      return n && n !== ed ? n : null;
+    };
+    const scope = what => {
+      if (!sel().isCollapsed) return false;
+      const r = document.createRange(); r.selectNodeContents((what === 'para' && blockOf()) || ed);
+      sel().removeAllRanges(); sel().addRange(r);
+      return true;
+    };
+    const curSize = () => {
+      let n = sel().anchorNode;
+      if (n && n.nodeType === 3) n = n.parentNode;
+      return n && ed.contains(n) ? Math.round(parseFloat(getComputedStyle(n).fontSize)) : Math.round(o.size);
+    };
+    const setSize = px => {
+      document.execCommand('styleWithCSS', false, false);
+      document.execCommand('fontSize', false, '7');
+      document.execCommand('styleWithCSS', false, true);
+      ed.querySelectorAll('font[size="7"]').forEach(f => { f.removeAttribute('size'); f.style.fontSize = px + 'px'; });
+    };
+    const SIZES = [14, 18, 22, 26, 30, 36, 42, 48, 56, 64, 80, 96];
+    const STATE = ['bold', 'italic', 'underline', 'strikeThrough', 'justifyLeft', 'justifyCenter', 'justifyRight', 'insertUnorderedList', 'insertOrderedList'];
+    const upd = () => {
+      if (!inEd()) return;
+      bar.querySelector('.szv').textContent = curSize();
+      for (const c of STATE) bar.querySelector(`[data-c=${c}]`).classList.toggle('on', document.queryCommandState(c));
+      place();
+    };
+    document.addEventListener('selectionchange', upd);
+    bar.cleanup = () => { document.removeEventListener('selectionchange', upd); bar.remove(); };
+    const swatches = (list, run, extra) => {
+      const el = h(`<div class="penpop"><div class="row">${list.map(c => `<button class="sw" data-v="${c}" style="background:${c}"></button>`).join('')}</div>${extra || ''}</div>`);
+      el.addEventListener('pointerdown', e => e.preventDefault());
+      el.addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (!b) return; ensure(); run(b.dataset.v); closePop(); upd(); place(); });
+      return el;
+    };
+    bar.addEventListener('click', e => {
+      const b = e.target.closest('[data-c]'); if (!b) return;
+      ensure();
+      const c = b.dataset.c;
+      switch (c) {
+        case 'done': if (this.editingText) this.editingText(); return;
+        case 'bigger': case 'smaller': {
+          const all = scope('all'), cur = curSize();
+          const nx = c === 'bigger' ? (SIZES.find(s => s > cur) || cur + 16) : ([...SIZES].reverse().find(s => s < cur) || Math.max(10, cur - 4));
+          setSize(nx); if (all) sel().collapseToEnd();
+          break;
+        }
+        case 'pTitle': case 'pSub': case 'pNormal': {
+          const para = scope('para');
+          if (c === 'pNormal') { document.execCommand('removeFormat'); setSize(Math.round(o.size)); }
+          else { setSize(c === 'pTitle' ? 56 : 40); if (!document.queryCommandState('bold')) document.execCommand('bold'); }
+          if (para) sel().collapseToEnd();
+          break;
+        }
+        case 'clear': document.execCommand('removeFormat'); break;
+        case 'font': {
+          const el = h(`<div class="menu">${Object.entries(RT.FAM_NAMES).map(([k, n]) => `<button data-f="${k}" style="font-family:${RT.FAM[k].replace(/"/g, "'")};font-size:18px">${n}</button>`).join('')}</div>`);
+          el.addEventListener('pointerdown', ev => ev.preventDefault());
+          el.addEventListener('click', ev => { const f = ev.target.closest('[data-f]'); if (!f) return; ensure(); const all = scope('all'); document.execCommand('fontName', false, RT.FAM[f.dataset.f]); if (all) sel().collapseToEnd(); closePop(); place(); });
+          pop(b, el, { side: 'below' });
+          return;
+        }
+        case 'color': pop(b, swatches([...GRAYS.slice(0, 4), ...COLORS, '#00838f', '#ad1457'], v => document.execCommand('foreColor', false, v)), { side: 'below' }); return;
+        case 'hilite': pop(b, swatches(['#ffe066', '#b9f6ca', '#b3e5fc', '#f8bbd0', '#e0e0e0'], v => document.execCommand('hiliteColor', false, v),
+          '<button class="btn sm ghost" data-v="transparent" style="margin-top:10px">Sin resaltado</button>'), { side: 'below' }); return;
+        default: document.execCommand(c);
+      }
+      upd(); place();
+    });
+    upd();
+    return bar;
   }
 
   async insertImages() {
@@ -1069,10 +1193,9 @@ export class Editor {
         const r = await prompt('Renombrar', [{ name: 't', label: 'Nombre', value: nb.title }]);
         if (r && r.t.trim()) { nb.title = r.t.trim(); await db.put('notebooks', nb); this.updTop(); }
       } },
-      nb.kind === 'paper' && { icon: 'folder', label: 'Mover a carpeta', run: async () => {
-        const folders = [...new Set((await db.all('notebooks')).map(n => n.folder).filter(Boolean))];
-        const r = await prompt('Carpeta', [{ name: 'f', label: 'Nombre de carpeta (vacío = sin carpeta)', value: nb.folder, list: folders }]);
-        if (r) { nb.folder = r.f.trim(); await db.put('notebooks', nb); toast('Guardado'); }
+      nb.kind !== 'daily' && { icon: 'move', label: 'Mover a carpeta', run: async () => {
+        const to = await FD.pickFolder(`Mover «${nb.title}» a…`, { current: nb.parent || '' });
+        if (to !== null && await FD.moveTo(nb, to)) toast('Movido');
       } },
       { icon: 'tag', label: 'Etiquetas', run: async () => {
         const r = await prompt('Etiquetas', [{ name: 't', label: 'Separadas por comas', value: (nb.tags || []).join(', ') }]);

@@ -1,4 +1,5 @@
 // Motor de tinta: pinceles, texto, imágenes, selección y reconocimiento de formas.
+import * as RT from './richtext.js';
 export const W = 1200, H = 1600; // tamaño lógico de la página (proporción 3:4)
 
 export const BRUSHES = [
@@ -71,22 +72,8 @@ export function drawStroke(ctx, s) {
   ctx.restore();
 }
 
-const mctx = document.createElement('canvas').getContext('2d');
-export function textBox(o) {
-  mctx.font = `${o.size}px ${FONT}`;
-  const lines = o.text.split('\n');
-  let w = 0;
-  for (const l of lines) w = Math.max(w, mctx.measureText(l).width);
-  return { x: o.x, y: o.y, w: Math.max(w, 10), h: lines.length * o.size * 1.3 };
-}
-function drawText(ctx, o) {
-  ctx.save();
-  ctx.fillStyle = o.c || '#141414';
-  ctx.font = `${o.size}px ${FONT}`;
-  ctx.textBaseline = 'top';
-  o.text.split('\n').forEach((l, i) => ctx.fillText(l, o.x, o.y + i * o.size * 1.3 + o.size * 0.1));
-  ctx.restore();
-}
+export const textBox = o => RT.box(o);
+const drawText = (ctx, o) => RT.draw(ctx, o);
 
 const IMG = new Map();
 export function loadImage(src) {
@@ -149,12 +136,12 @@ export function scale(o, ox, oy, k) {
     o.w *= k;
   } else {
     o.x = ox + (o.x - ox) * k; o.y = oy + (o.y - oy) * k;
-    if (o.t === 'x') o.size *= k; else { o.w *= k; o.h *= k; }
+    if (o.t === 'x') RT.scale(o, k); else { o.w *= k; o.h *= k; }
   }
 }
 
 export function restore(o, src) {
-  for (const k in src) { const v = src[k]; o[k] = Array.isArray(v) ? v.slice() : v; }
+  for (const k in src) { const v = src[k]; o[k] = k === 'paras' ? JSON.parse(JSON.stringify(v)) : Array.isArray(v) ? v.slice() : v; }
 }
 
 export const clone = o => JSON.parse(JSON.stringify(o));

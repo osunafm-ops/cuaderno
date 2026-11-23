@@ -58,7 +58,15 @@ export const ICONS = {
   dup: 'M8 8h12v12H8zM4 16V4h12M14 11v6M11 14h6',
   moveLayer: 'M12 3l9 5-9 5-9-5zM12 13v8M9 18l3 3 3-3',
   grid: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
-  spark: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z',
+  alignL: 'M4 6h16M4 10h10M4 14h16M4 18h10',
+  alignC: 'M4 6h16M7 10h10M4 14h16M7 18h10',
+  alignR: 'M4 6h16M10 10h10M4 14h16M10 18h10',
+  listB: 'M9 6h11M9 12h11M9 18h11M4 6h1M4 12h1M4 18h1',
+  listN: 'M10 6h10M10 12h10M10 18h10M4 4.5l1.2-.5v4M3.8 10.5h2.2l-2 2.5h2.2M3.8 16h2.2v4H3.8M4 18h2',
+  folderOpen: 'M3 7V5h6l2 2h8v3M3 7v12h15l3-9H6l-3 9',
+  folderPlus: 'M3 6h6l2 2h10v11H3zM12 11v5M9.5 13.5h5',
+  move: 'M3 6h6l2 2h10v11H3zM9 14h7M13 11l3 3-3 3',
+  spark:'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z',
   cloud:'M7 18h10.5a4 4 0 0 0 .4-7.98A6 6 0 0 0 6.2 9.6 4.3 4.3 0 0 0 7 18z',
   repeat: 'M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4'
 };
