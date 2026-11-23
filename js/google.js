@@ -3,7 +3,7 @@ import { settings, saveSettings } from './settings.js';
 import { loadScript } from './ui.js';
 
 // ID de cliente de la app registrada en Google Cloud (no es secreto). Se puede cambiar en Ajustes.
-export const DEFAULT_CLIENT_ID = '';
+export const DEFAULT_CLIENT_ID = '353847478669-qr3jkf39dn52liurf5hsldiffm847qqo.apps.googleusercontent.com';
 
 export const SCOPE = {
   drive: 'https://www.googleapis.com/auth/drive.file',
