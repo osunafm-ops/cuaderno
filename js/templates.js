@@ -159,3 +159,22 @@ export function drawTemplate(ctx, id, W, H, { thick = 1, alpha = 1 } = {}) {
   }
   ctx.restore();
 }
+
+// Fondo de las páginas infinitas: solo la zona visible (x, y, w, h en coordenadas de página).
+export function drawInfinite(ctx, id, vx, vy, vw, vh, k = 1) {
+  const C = 'rgba(20,20,20,.2)', CS = 'rgba(20,20,20,.12)', far = k < 0.3;
+  const step = id === 'rayas' ? 64 : id === 'rayas_f' ? 46 : 50, m = far ? 4 : 1, s = step * m;
+  const x0 = Math.floor(vx / s) * s, y0 = Math.floor(vy / s) * s;
+  ctx.save();
+  ctx.strokeStyle = id === 'cuadros' ? CS : C; ctx.fillStyle = C; ctx.lineWidth = 1.4 / Math.max(0.35, Math.min(1, k));
+  ctx.beginPath();
+  if (id === 'rayas' || id === 'rayas_f' || id === 'cuadros') for (let y = y0; y <= vy + vh; y += s) { ctx.moveTo(vx, y); ctx.lineTo(vx + vw, y); }
+  if (id === 'cuadros') for (let x = x0; x <= vx + vw; x += s) { ctx.moveTo(x, vy); ctx.lineTo(x, vy + vh); }
+  ctx.stroke();
+  if (id === 'puntos') { const r = 2.6 / Math.max(0.4, Math.min(1, k)); for (let x = x0; x <= vx + vw; x += s) for (let y = y0; y <= vy + vh; y += s) ctx.fillRect(x - r, y - r, 2 * r, 2 * r); }
+  if (id === 'isometrico') {
+    const dy = s * Math.sin(Math.PI / 3);
+    for (let r = Math.floor(vy / dy); r * dy <= vy + vh; r++) for (let x = x0 + (r & 1) * s / 2; x <= vx + vw; x += s) ctx.fillRect(x - 2, r * dy - 2, 4, 4);
+  }
+  ctx.restore();
+}

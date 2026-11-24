@@ -19,6 +19,11 @@ App web instalable (PWA) que imita una tableta de tinta electrónica tipo VIWOOD
 - `js/folders.js` — carpetas en árbol: registros `kind:'folder'` en `notebooks`, campo `parent` ('' = raíz).
 - `js/google.js` + `js/sync.js` — sincronización con Google: carpeta de Drive «Cuaderno (sincronización)» con `indice.json`, calendario propio «Cuaderno», lista de Tasks «Cuaderno», y lectura de los demás calendarios (solo lectura).
 - `js/ai.js` — Gemini (reintentos y modelo de reserva si está saturado).
+- `js/checklist.js` — listas con casillas (objeto `t:'c'`). `js/ms.js` — calendario de Office 365 (Graph, PKCE, solo lectura; `GUIA-OFFICE365.md`).
+- `js/backup-core.js` (lo usan la app y `sw.js`) + `js/backup.js` — copia de cada noche: 3 en la tablet (OPFS) y 14 en Drive, carpeta «Cuaderno (copias de seguridad)». No lleva la clave de Gemini.
+- Dos páginas a la vez: ruta `#/ed/<nb>/<pág>/<nb2>/<pág2>`; los paneles del mismo cuaderno comparten objeto `nb` (y `page`). Páginas infinitas: `page.inf`, lienzo del tamaño de la vista, zona `ext` que crece.
+- Google Fotos: la web no puede descargar de Google Fotos (sus servidores no lo permiten, comprobado 24/11/2026). Se usa el selector de Android y «Compartir» → Cuaderno (`share_target` del manifest, `#/compartir`).
+- v12 (24/11/2026): probada en el navegador del ordenador; falta publicarla y probarla en la tablet (compartir fotos, copia en Drive y con la app cerrada, Office 365).
 - `GUIA-GOOGLE.md` — pasos de registro en Google Cloud.
 
 ## Google
@@ -32,5 +37,5 @@ App web instalable (PWA) que imita una tableta de tinta electrónica tipo VIWOOD
 - Quiere la app lo más parecida posible a las tabletas E Ink (VIWOODS, AINOTE 2).
 
 ## Pendiente / ideas no hechas
-- Mapas mentales interactivos, página infinita, transcripción en directo mientras se graba, panel flotante de nota rápida.
+- Mapas mentales interactivos, transcripción en directo mientras se graba, panel flotante de nota rápida.
 - Probar en la tablet real: dictado, grabación, barra de formato con S Pen, permiso de calendarios.

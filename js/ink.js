@@ -1,5 +1,6 @@
 // Motor de tinta: pinceles, texto, imágenes, selección y reconocimiento de formas.
 import * as RT from './richtext.js';
+import * as CK from './checklist.js';
 export const W = 1200, H = 1600; // tamaño lógico de la página (proporción 3:4)
 
 export const BRUSHES = [
@@ -89,6 +90,7 @@ export function loadImage(src) {
 export function drawObj(ctx, o, onload) {
   if (o.t === 's') return drawStroke(ctx, o);
   if (o.t === 'x') return drawText(ctx, o);
+  if (o.t === 'c') return CK.draw(ctx, o);
   if (o.t === 'i') {
     const im = IMG.get(o.src);
     if (im && im.complete && im.naturalWidth) ctx.drawImage(im, o.x, o.y, o.w, o.h);
@@ -100,16 +102,21 @@ export async function preload(objs) {
   await Promise.all(objs.filter(o => o.t === 'i').map(o => loadImage(o.src)));
 }
 
+// Caja de cada trazo, recordada para no recalcularla en las páginas infinitas.
+const BOX = new WeakMap();
 export function bbox(o) {
   if (o.t === 's') {
-    const p = o.pts;
+    const p = o.pts, hit = BOX.get(o);
+    if (hit && hit.n === p.length) return { ...hit.b };
     let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
     for (let i = 0; i < p.length; i += 3) {
       if (p[i] < a) a = p[i]; if (p[i] > c) c = p[i];
       if (p[i + 1] < b) b = p[i + 1]; if (p[i + 1] > d) d = p[i + 1];
     }
     const m = o.b === 'marca' ? o.w * 1.5 : o.w * 1.4;
-    return { x: a - m, y: b - m, w: c - a + 2 * m, h: d - b + 2 * m };
+    const box = { x: a - m, y: b - m, w: c - a + 2 * m, h: d - b + 2 * m };
+    BOX.set(o, { n: p.length, b: box });
+    return { ...box };
   }
   if (o.t === 'x') return textBox(o);
   return { x: o.x, y: o.y, w: o.w, h: o.h };
@@ -125,23 +132,26 @@ export function unionBox(objs) {
 }
 
 export function translate(o, dx, dy) {
+  BOX.delete(o);
   if (o.t === 's') { const p = o.pts; for (let i = 0; i < p.length; i += 3) { p[i] += dx; p[i + 1] += dy; } }
   else { o.x += dx; o.y += dy; }
 }
 
 export function scale(o, ox, oy, k) {
+  BOX.delete(o);
   if (o.t === 's') {
     const p = o.pts;
     for (let i = 0; i < p.length; i += 3) { p[i] = ox + (p[i] - ox) * k; p[i + 1] = oy + (p[i + 1] - oy) * k; }
     o.w *= k;
   } else {
     o.x = ox + (o.x - ox) * k; o.y = oy + (o.y - oy) * k;
-    if (o.t === 'x') RT.scale(o, k); else { o.w *= k; o.h *= k; }
+    if (o.t === 'x') RT.scale(o, k); else { o.w *= k; o.h *= k; if (o.t === 'c') { o.size *= k; o.h = CK.layout(o).h; } }
   }
 }
 
 export function restore(o, src) {
-  for (const k in src) { const v = src[k]; o[k] = k === 'paras' ? JSON.parse(JSON.stringify(v)) : Array.isArray(v) ? v.slice() : v; }
+  BOX.delete(o);
+  for (const k in src) { const v = src[k]; o[k] = k === 'paras' || k === 'items' ? JSON.parse(JSON.stringify(v)) : Array.isArray(v) ? v.slice() : v; }
 }
 
 export const clone = o => JSON.parse(JSON.stringify(o));

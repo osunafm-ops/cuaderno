@@ -2,8 +2,8 @@
 import { db, uid } from './db.js';
 import * as ink from './ink.js';
 import { W, H, BRUSHES, WIDTHS } from './ink.js';
-import { TEMPLATES, drawTemplate } from './templates.js';
-import { settings, saveSettings } from './settings.js';
+import { TEMPLATES, drawTemplate, drawInfinite } from './templates.js';
+import { settings, saveSettings, PAPER } from './settings.js';
 import { h, icon, esc, pop, menu, modal, prompt, confirm, toast, flash, pickFiles, download, shareOrDownload, dkey, fmtDate, fmtDur, closePop } from './ui.js';
 import * as store from './store.js';
 import { drawBackground, pagePNG, notebookPDF, pageCanvas, safeName } from './render.js';
@@ -11,8 +11,13 @@ import { hooks as syncHooks, onSync } from './sync.js';
 import * as AI from './ai.js';
 import * as RT from './richtext.js';
 import * as FD from './folders.js';
+import * as CK from './checklist.js';
+import { pageArea } from './render.js';
 
 let CLIP = null;
+const LIVE = new Set();      // paneles abiertos (uno, o dos con la pantalla dividida)
+let ACTIVE = null;           // panel en el que se está trabajando
+export const flushAll = async () => { for (const e of LIVE) await e.flushSave(); };
 // Reduce una imagen (dataURL) para guardarla como miniatura.
 async function shrink(src, max = 520) {
   const im = await ink.loadImage(src);
@@ -28,8 +33,10 @@ const HL_GRAYS = ['#9a9a9a', '#c4c4c4'];
 const HL_COLORS = ['#ffd400', '#7fd3ff', '#9be59b', '#ffa0c8'];
 
 export class Editor {
-  constructor(root, nb, idx) {
-    this.root = root; this.nb = nb;
+  constructor(root, nb, idx, opts = {}) {
+    this.root = root; this.nb = nb; this.opts = opts;
+    this.lh = opts.right ?? settings.leftHanded; // barra a la derecha
+    this.X0 = 0; this.Y0 = 0; this.PW = W; this.PH = H; this.vx = 0; this.vy = 0; this.ext = null;
     this.idx = Math.max(0, Math.min(idx ?? nb.last ?? 0, nb.pages.length - 1));
     this.tool = 'pen0'; this.undo = []; this.redo = [];
     this.touches = new Map(); this.g = null; this.act = null; this.sel = null;
@@ -39,7 +46,7 @@ export class Editor {
   // ---------------- montaje ----------------
   async init() {
     this.root.innerHTML = '';
-    this.el = h(`<div class="ed ${settings.leftHanded ? 'lh' : ''}">
+    this.el = h(`<div class="ed ${this.lh ? 'lh' : ''} ${this.opts.split ? 'mini' : ''}">
       <aside class="tb">
         <button data-a="exit" title="Salir">${icon('back')}</button><hr>
         <button data-t="pen0" title="Lápiz 1 (pulsa otra vez para ajustar)">${icon('pen')}<span class="dot"></span></button>
@@ -48,7 +55,8 @@ export class Editor {
         <button data-t="eraser" title="Borrador">${icon('eraser')}</button>
         <button data-t="lasso" title="Lazo">${icon('lasso')}</button>
         <button data-t="text" title="Texto">${icon('text')}</button>
-        <button data-a="image" title="Insertar imagen">${icon('image')}</button>
+        <button data-a="image" title="Insertar foto o imagen">${icon('image')}</button>
+        <button data-a="check" title="Lista con casillas">${icon('checks')}</button>
         <button data-a="ai" title="Gemini (IA)">${icon('spark')}</button><hr>
         <button data-a="undo" title="Deshacer">${icon('undo')}</button>
         <button data-a="redo" title="Rehacer">${icon('redo')}</button><hr>
@@ -69,8 +77,11 @@ export class Editor {
           <button class="pgl" data-a="goto" title="Ir a página"></button>
           <button class="ib" data-a="next" title="Página siguiente">${icon('right')}</button>
           <button class="ib" data-a="addpage" title="Nueva página">${icon('plus')}</button>
+          <button class="ib" data-a="split" title="${this.opts.split ? 'Opciones de pantalla dividida' : 'Dos páginas a la vez'}">${icon('split')}</button>
+          <button class="ib" data-a="full" title="Pantalla completa">${icon('full')}</button>
         </header>
         <div class="scroller"><div class="sheet"><canvas class="c-bg"></canvas><canvas class="c-ink"></canvas><canvas class="c-live"></canvas><div class="ovl"></div></div></div>
+        <div class="zenbar"><button class="ib" data-a="prev" title="Página anterior">${icon('left')}</button><span class="pgl2"></span><button class="ib" data-a="next" title="Página siguiente">${icon('right')}</button><button class="ib" data-a="full" title="Salir de pantalla completa">${icon('unfull')}</button></div>
       </section></div>`);
     this.root.append(this.el);
     const q = s => this.el.querySelector(s);
@@ -86,6 +97,10 @@ export class Editor {
     q('.ed-top').addEventListener('click', e => {
       const b = e.target.closest('button[data-a]'); if (b) this.action(b.dataset.a, b);
     });
+    q('.zenbar').addEventListener('click', e => { const b = e.target.closest('button[data-a]'); if (b) this.action(b.dataset.a, b); });
+    LIVE.add(this); if (!ACTIVE || !LIVE.has(ACTIVE)) ACTIVE = this;
+    this.el.addEventListener('pointerdown', () => { ACTIVE = this; if (this.opts.onActive) this.opts.onActive(this); }, true);
+    this.sc.addEventListener('scroll', () => this.onScroll(), { passive: true });
     const L = this.cLive;
     L.addEventListener('pointerdown', e => this.down(e));
     L.addEventListener('pointermove', e => this.move(e));
@@ -100,7 +115,7 @@ export class Editor {
     this.onKey = e => this.key(e);
     addEventListener('keydown', this.onKey);
     this.setupExtra();
-    syncHooks.before = () => this.flushSave();
+    syncHooks.before = flushAll;
     // Cuando terminan de cargar las letras (negrita, cursiva, «a mano»…), redibujar los textos.
     this.onFonts = () => this.reqInk();
     document.fonts?.addEventListener('loadingdone', this.onFonts);
@@ -117,8 +132,10 @@ export class Editor {
     if (ch.has('notebooks/' + this.nb.id)) {
       const fresh = await db.get('notebooks', this.nb.id);
       if (!fresh) { toast('Este cuaderno se eliminó en otra tablet'); location.hash = '#/home'; return; }
-      const curId = this.nb.pages[this.idx];
-      this.nb = fresh;
+      // Se cambia «por dentro» para que los dos paneles sigan compartiendo el mismo cuaderno.
+      const curId = this.page ? this.page.id : this.nb.pages[this.idx];
+      for (const k of Object.keys(this.nb)) if (!(k in fresh)) delete this.nb[k];
+      Object.assign(this.nb, fresh);
       const i = fresh.pages.indexOf(curId);
       if (i < 0) { await this.loadPage(Math.min(this.idx, fresh.pages.length - 1), false); return; }
       this.idx = i;
@@ -126,14 +143,27 @@ export class Editor {
     }
     if (this.page && ch.has('pages/' + this.page.id) && !this.saveT && !this.act && !this.editingText) {
       const p = await db.get('pages', this.page.id);
-      if (p) { this.page = p; this.undo = []; this.redo = []; this.sel = null; await this.renderBg(); this.renderInk(); this.drawSel(); this.updTop(); }
+      if (p) { for (const k of Object.keys(this.page)) if (!(k in p)) delete this.page[k]; Object.assign(this.page, p); this.undo = []; this.redo = []; this.sel = null; await this.renderBg(); this.renderInk(); this.drawSel(); this.updTop(); }
     }
   }
 
+  // ---------------- dos páginas a la vez ----------------
+  peers() { return [...LIVE].filter(e => e !== this && e.nb.id === this.nb.id); }
+  samePage() { return this.peers().filter(e => e.page && this.page && e.page.id === this.page.id); }
+  // El otro panel ha añadido, movido o borrado páginas de este mismo cuaderno.
+  async resync() {
+    const i = this.nb.pages.indexOf(this.page.id);
+    if (i >= 0) { this.idx = i; this.updTop(); return; }
+    clearTimeout(this.saveT); this.saveT = 0;
+    await this.loadPage(Math.min(this.idx, this.nb.pages.length - 1), false);
+  }
+  async tellPeers() { for (const e of this.peers()) await e.resync(); }
+
   async destroy() {
     this.offSync?.();
+    LIVE.delete(this); if (ACTIVE === this) ACTIVE = [...LIVE][0] || null;
     document.fonts?.removeEventListener('loadingdone', this.onFonts);
-    if (syncHooks.before) syncHooks.before = null;
+    if (!LIVE.size) syncHooks.before = null;
     this.ro?.disconnect();
     removeEventListener('keydown', this.onKey);
     if (this.editingText) this.editingText();
@@ -148,14 +178,19 @@ export class Editor {
     await this.flushSave();
     if (this.editingText) this.editingText();
     this.idx = i;
-    let p = await db.get('pages', this.nb.pages[i]);
+    const other = this.peers().find(e => e.page && e.page.id === this.nb.pages[i]);
+    let p = other ? other.page : await db.get('pages', this.nb.pages[i]);
     if (!p) { p = store.newPage(this.nb.id, this.nb.tpl); this.nb.pages[i] = p.id; await db.put('pages', p); }
     this.page = p;
     this.undo = []; this.redo = []; this.sel = null; this.act = null;
     if (this.nb.last !== i) { this.nb.last = i; db.put('notebooks', this.nb); }
-    if (!this.z) this.fit(); else { this.renderBg(); this.renderInk(); this.drawSel(); }
+    this.ext = null;
+    this.sc.classList.toggle('inf', !!p.inf);
+    if (!p.inf && this.zMul < 0.6) this.zMul = 1;
+    this.fit();
+    if (p.inf) this.goHome();
     this.updTop();
-    this.sc.scrollTop = 0;
+    if (!p.inf) this.sc.scrollTop = 0;
     if (fx) flash();
   }
 
@@ -169,18 +204,19 @@ export class Editor {
   async addPage(at = this.idx + 1, tpl) {
     await this.flushSave();
     const t = tpl || (this.nb.kind === 'book' ? 'blanco' : this.page.tpl);
-    const p = store.newPage(this.nb.id, t);
+    const p = store.newPage(this.nb.id, t, this.page.inf ? { inf: true } : {});
     await db.put('pages', p);
     this.nb.pages.splice(at, 0, p.id);
     await db.put('notebooks', this.nb);
     await this.loadPage(at);
+    await this.tellPeers();
   }
 
   updTop() {
     const q = this.q, p = this.page;
     q('.ttl').textContent = this.nb.title;
-    q('.pgl').textContent = `${this.idx + 1} / ${this.nb.pages.length}`;
-    q('.badges').innerHTML = (p.locked ? `<span class="badge">${icon('lock')}</span>` : '') + (p.mark ? `<span class="badge">${icon('bookmark')}</span>` : '');
+    q('.pgl').textContent = q('.pgl2').textContent = `${this.idx + 1} / ${this.nb.pages.length}`;
+    q('.badges').innerHTML = (p.locked ? `<span class="badge">${icon('lock')}</span>` : '') + (p.inf ? `<span class="badge" title="Página infinita">${icon('inf')}</span>` : '') + (p.mark ? `<span class="badge">${icon('bookmark')}</span>` : '');
   }
 
   // ---------------- zoom y dibujo de lienzos ----------------
@@ -191,34 +227,116 @@ export class Editor {
     this.setZoom(this.zMul, false, true);
   }
 
+  zMin() { return this.page?.inf ? 0.15 : 0.6; }
+
   setZoom(m, keep = true, force = false) {
-    m = Math.max(0.6, Math.min(4, m));
+    m = Math.max(this.zMin(), Math.min(4, m));
     const z = this.zFit * m;
     if (!force && Math.abs(z - this.z) < 1e-4) return;
-    const sc = this.sc, oz = this.z || z;
-    const cx = (sc.scrollLeft + sc.clientWidth / 2) / oz, cy = (sc.scrollTop + sc.clientHeight / 2) / oz;
+    const sc = this.sc, oz = this.z || z, inf = !!this.page?.inf, had = !inf || !!this.ext;
+    const cx = (sc.scrollLeft + sc.clientWidth / 2) / oz + this.X0, cy = (sc.scrollTop + sc.clientHeight / 2) / oz + this.Y0;
     this.zMul = m; this.z = z;
+    if (inf) {
+      const vw = sc.clientWidth / z, vh = sc.clientHeight / z;
+      this.extend(had ? { x: cx - vw / 2, y: cy - vh / 2, w: vw, h: vh } : null);
+    } else { this.X0 = 0; this.Y0 = 0; this.PW = W; this.PH = H; }
     this.layout();
-    if (keep) { sc.scrollLeft = cx * z - sc.clientWidth / 2; sc.scrollTop = cy * z - sc.clientHeight / 2; }
+    if ((keep || inf) && had) { sc.scrollLeft = (cx - this.X0) * z - sc.clientWidth / 2; sc.scrollTop = (cy - this.Y0) * z - sc.clientHeight / 2; }
+    this.placeView();
     this.renderBg(); this.renderInk(); this.drawSel();
     this.q('.zv').textContent = Math.round(m * 100) + '%';
   }
 
   layout() {
-    const z = this.z, dpr = devicePixelRatio || 1;
+    const z = this.z, dpr = devicePixelRatio || 1, inf = !!this.page?.inf;
     const k = Math.min(z * dpr, 2.2);
     this.k = k;
-    const sw = W * z, sh = H * z, cw = Math.round(W * k), ch = Math.round(H * k);
-    this.sheet.style.width = sw + 'px'; this.sheet.style.height = sh + 'px';
+    this.sheet.style.width = this.PW * z + 'px'; this.sheet.style.height = this.PH * z + 'px';
+    const sw = inf ? this.sc.clientWidth : W * z, sh = inf ? this.sc.clientHeight : H * z;
+    const cw = Math.round(sw / z * k), ch = Math.round(sh / z * k);
     for (const c of [this.cBg, this.cInk, this.cLive]) {
       c.width = cw; c.height = ch; c.style.width = sw + 'px'; c.style.height = sh + 'px';
-      c.getContext('2d').setTransform(k, 0, 0, k, 0, 0);
+    }
+    this.placeView();
+  }
+
+  // ---------------- página infinita ----------------
+  // El lienzo solo cubre lo que se ve y se mueve con el desplazamiento; la hoja crece al acercarse a un borde.
+  placeView() {
+    const inf = !!this.page?.inf, z = this.z, k = this.k, sc = this.sc;
+    this.vx = inf ? sc.scrollLeft / z + this.X0 : 0;
+    this.vy = inf ? sc.scrollTop / z + this.Y0 : 0;
+    for (const c of [this.cBg, this.cInk, this.cLive]) {
+      c.style.left = inf ? sc.scrollLeft + 'px' : '0px'; c.style.top = inf ? sc.scrollTop + 'px' : '0px';
+      c.getContext('2d').setTransform(k, 0, 0, k, -this.vx * k, -this.vy * k);
     }
   }
+  viewRect() { return { x: this.vx, y: this.vy, w: this.cInk.width / this.k, h: this.cInk.height / this.k }; }
+  clear(x) { x.save(); x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, x.canvas.width, x.canvas.height); x.restore(); }
+
+  // Zona útil: lo escrito, lo que se ve y una pantalla de margen alrededor.
+  extend(view) {
+    const vw = this.sc.clientWidth / this.z, vh = this.sc.clientHeight / this.z, a = pageArea(this.page);
+    const rs = [a, { x: 0, y: 0, w: W, h: H }]; if (view) rs.push(view);
+    let x0 = Math.min(...rs.map(r => r.x)) - vw, y0 = Math.min(...rs.map(r => r.y)) - vh;
+    let x1 = Math.max(...rs.map(r => r.x + r.w)) + vw, y1 = Math.max(...rs.map(r => r.y + r.h)) + vh;
+    if (this.ext) { x0 = Math.min(x0, this.ext.x0); y0 = Math.min(y0, this.ext.y0); x1 = Math.max(x1, this.ext.x1); y1 = Math.max(y1, this.ext.y1); }
+    const L = 150000;
+    this.ext = { x0: Math.max(-L, x0), y0: Math.max(-L, y0), x1: Math.min(L, x1), y1: Math.min(L, y1) };
+    this.X0 = this.ext.x0; this.Y0 = this.ext.y0; this.PW = this.ext.x1 - this.ext.x0; this.PH = this.ext.y1 - this.ext.y0;
+  }
+
+  onScroll() {
+    if (!this.page?.inf || this.rafView) return;
+    this.rafView = requestAnimationFrame(() => {
+      this.rafView = 0;
+      if (!this.page?.inf || !this.el.isConnected) return;
+      this.grow(); this.placeView(); this.renderBg(); this.renderInk(); this.paintLive();
+    });
+  }
+
+  grow() {
+    if (this.editingText || this.g?.pinch) return;
+    const sc = this.sc, z = this.z, mx = sc.clientWidth * 0.5, my = sc.clientHeight * 0.5;
+    const near = sc.scrollLeft < mx || sc.scrollTop < my || sc.scrollLeft + sc.clientWidth > this.PW * z - mx || sc.scrollTop + sc.clientHeight > this.PH * z - my;
+    if (!near) return;
+    const ox = this.X0, oy = this.Y0, sl = sc.scrollLeft, st = sc.scrollTop;
+    this.extend({ x: sl / z + ox, y: st / z + oy, w: sc.clientWidth / z, h: sc.clientHeight / z });
+    const dx = (ox - this.X0) * z, dy = (oy - this.Y0) * z;
+    this.sheet.style.width = this.PW * z + 'px'; this.sheet.style.height = this.PH * z + 'px';
+    if (dx || dy) {
+      sc.scrollLeft = sl + dx; sc.scrollTop = st + dy;
+      if (this.g) { this.g.sl += dx; this.g.st += dy; }
+    }
+    this.drawSel();
+  }
+
+  // Ir a la esquina de lo escrito (o al origen si está vacía).
+  goHome() {
+    const a = pageArea(this.page), z = this.z;
+    const x = Math.min(0, a.x), y = Math.min(0, a.y);
+    this.sc.scrollLeft = (x - 12 / z - this.X0) * z; this.sc.scrollTop = (y - 12 / z - this.Y0) * z;
+    this.placeView(); this.renderBg(); this.renderInk(); this.drawSel();
+  }
+  // Ver todo lo escrito de una vez.
+  goAll() {
+    const a = pageArea(this.page), sc = this.sc;
+    this.setZoom(Math.min(sc.clientWidth / a.w, sc.clientHeight / a.h) / this.zFit * 0.95);
+    const z = this.z;
+    sc.scrollLeft = (a.x + a.w / 2 - this.X0) * z - sc.clientWidth / 2; sc.scrollTop = (a.y + a.h / 2 - this.Y0) * z - sc.clientHeight / 2;
+    this.placeView(); this.renderBg(); this.renderInk(); this.drawSel();
+  }
+  center() { const v = this.viewRect(); return this.page.inf ? { x: v.x + v.w / 2, y: v.y + v.h / 2 } : { x: W / 2, y: H / 2 }; }
 
   async renderBg() {
     if (!this.page) return;
     const tok = this.bgTok = (this.bgTok || 0) + 1;
+    if (this.page.inf) {
+      const v = this.viewRect(), x = this.xBg;
+      x.fillStyle = PAPER[settings.tone] || PAPER.eink; x.fillRect(v.x, v.y, v.w, v.h);
+      drawInfinite(x, this.page.tpl, v.x, v.y, v.w, v.h, this.k);
+      return;
+    }
     const off = document.createElement('canvas');
     off.width = this.cBg.width; off.height = this.cBg.height;
     const x = off.getContext('2d'); x.setTransform(this.k, 0, 0, this.k, 0, 0);
@@ -230,12 +348,16 @@ export class Editor {
   renderInk() {
     if (!this.page) return;
     const x = this.xInk;
-    x.clearRect(0, 0, W, H);
-    for (const L of this.page.layers) if (L.vis) for (const o of L.objs) ink.drawObj(x, o, () => this.reqInk());
+    this.clear(x);
+    const v = this.page.inf ? this.viewRect() : null;
+    for (const L of this.page.layers) if (L.vis) for (const o of L.objs) {
+      if (v && o.t !== 'x') { const b = ink.bbox(o); if (b.x > v.x + v.w || b.y > v.y + v.h || b.x + b.w < v.x || b.y + b.h < v.y) continue; }
+      ink.drawObj(x, o, () => this.reqInk());
+    }
     // Marcas de índice y destacados en el margen
     for (const m of this.page.marks || []) {
       x.save(); x.fillStyle = '#141414'; x.font = '600 34px Inter, sans-serif'; x.textBaseline = 'middle';
-      x.fillText(m.type === 'star' ? '★' : '§', Math.max(6, m.box.x - 44), m.box.y + Math.min(30, m.box.h / 2));
+      x.fillText(m.type === 'star' ? '★' : '§', this.page.inf ? m.box.x - 44 : Math.max(6, m.box.x - 44), m.box.y + Math.min(30, m.box.h / 2));
       x.restore();
     }
   }
@@ -244,7 +366,7 @@ export class Editor {
 
   paintLive() {
     const x = this.xLive, a = this.act;
-    x.clearRect(0, 0, W, H);
+    this.clear(x);
     if (!a) return;
     if (a.kind === 'draw') ink.drawStroke(x, a.s);
     else if (a.kind === 'lasso' || a.kind === 'eraseArea') {
@@ -259,7 +381,7 @@ export class Editor {
   // ---------------- herramientas ----------------
   layer() { return this.page.layers[this.page.al] || this.page.layers[0]; }
   isLocked() { return !!this.page.locked; }
-  side() { return settings.leftHanded ? 'left' : 'right'; }
+  side() { return this.lh ? 'left' : 'right'; }
 
   pickTool(t, btn) {
     if (this.editingText) this.editingText();
@@ -364,6 +486,8 @@ export class Editor {
     this.clearSel(); this.renderInk(); this.dirty();
   }
   dirty() {
+    // El otro panel enseña esta misma página: que se vea el cambio al momento.
+    for (const e of this.samePage()) { e.undo = []; e.redo = []; e.clearSel(); e.reqInk(); e.updTop(); }
     clearTimeout(this.saveT);
     this.saveT = setTimeout(() => { this.saveT = 0; this.save(); }, 800);
   }
@@ -373,6 +497,13 @@ export class Editor {
   thumb() {
     const c = document.createElement('canvas'); c.width = 180; c.height = 240;
     const x = c.getContext('2d');
+    if (this.page.inf) {
+      const a = pageArea(this.page), s = Math.min(180 / a.w, 240 / a.h);
+      x.fillStyle = PAPER[settings.tone] || PAPER.eink; x.fillRect(0, 0, 180, 240);
+      x.setTransform(s, 0, 0, s, (180 - a.w * s) / 2 - a.x * s, (240 - a.h * s) / 2 - a.y * s);
+      for (const L of this.page.layers) if (L.vis) for (const o of L.objs) ink.drawObj(x, o);
+      return c.toDataURL('image/jpeg', 0.72);
+    }
     x.drawImage(this.cBg, 0, 0, 180, 240); x.drawImage(this.cInk, 0, 0, 180, 240);
     return c.toDataURL('image/jpeg', 0.72);
   }
@@ -383,7 +514,7 @@ export class Editor {
     await db.put('pages', p);
     this.nb.updated = p.updated;
     // Texto de la página para el buscador: lo tecleado + lo reconocido de la escritura (si se pidió).
-    const typed = p.layers.flatMap(L => L.objs).filter(o => o.t === 'x').map(o => o.text || RT.plain(o)).join(' ');
+    const typed = p.layers.flatMap(L => L.objs).filter(o => o.t === 'x' || o.t === 'c').map(o => o.t === 'c' ? CK.text(o) : o.text || RT.plain(o)).join(' ');
     this.nb.txt = { ...(this.nb.txt || {}), [p.id]: (typed + ' ' + (p.ocr || '') + ' ' + (p.marks || []).map(m => m.label || '').join(' ')).trim() };
     this.nb.marks = (this.nb.marks || []).filter(m => m.pid !== p.id).concat((p.marks || []).map(m => ({ ...m, pid: p.id })));
     if (this.idx === 0 || !this.nb.cover) this.nb.cover = p.thumb;
@@ -392,8 +523,8 @@ export class Editor {
 
   // ---------------- entrada: S Pen, dedo y ratón ----------------
   pt(e) {
-    const r = this.cLive.getBoundingClientRect();
-    return { x: (e.clientX - r.left) / this.z, y: (e.clientY - r.top) / this.z, p: e.pointerType === 'pen' ? (e.pressure || 0.5) : 0.5 };
+    const r = this.sheet.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / this.z + this.X0, y: (e.clientY - r.top) / this.z + this.Y0, p: e.pointerType === 'pen' ? (e.pressure || 0.5) : 0.5 };
   }
 
   effTool(e) {
@@ -452,6 +583,7 @@ export class Editor {
           if (g.n >= 2 && !g.moved && dt < 450 && settings.gestures) { g.n === 2 ? this.doUndo() : this.doRedo(); }
           else if (g.n === 1 && settings.penOnly && settings.swipe) {
             const dx = t.x - t.sx, dy = t.y - t.sy;
+            if (!g.moved && dt < 400) { const c = this.checkAt(this.pt(e)); if (c && !this.isLocked()) this.toggleCheck(c); }
             const noOverflowX = this.sc.scrollWidth <= this.sc.clientWidth + 2;
             if (noOverflowX && Math.abs(dx) > 90 && Math.abs(dy) < 80) this.go(dx < 0 ? 1 : -1);
           }
@@ -471,7 +603,7 @@ export class Editor {
   movePinch() {
     const [a, b] = [...this.touches.values()];
     const P = this.g.pinch;
-    P.s = Math.max(0.6 / P.m0, Math.min(4 / P.m0, Math.hypot(a.x - b.x, a.y - b.y) / P.d0));
+    P.s = Math.max(this.zMin() / P.m0, Math.min(4 / P.m0, Math.hypot(a.x - b.x, a.y - b.y) / P.d0));
     if (Math.abs(P.s - 1) > 0.04) { this.g.moved = true; this.sheet.style.transform = `scale(${P.s})`; }
   }
   endPinch() {
@@ -487,7 +619,7 @@ export class Editor {
       case 'pen0': case 'pen1': case 'hl': {
         const cfg = tool === 'hl' ? settings.hl : settings.pens[+tool.slice(3)];
         const s = { t: 's', b: tool === 'hl' ? 'marca' : cfg.b, w: cfg.w, c: cfg.c, pts: [p.x, p.y, p.p] };
-        this.act = { id, touch, kind: 'draw', s, t0: performance.now(), wall: Date.now() };
+        this.act = { id, touch, kind: 'draw', s, t0: performance.now(), wall: Date.now(), check: this.checkAt(p) };
         this.armHold(p);
         this.reqLive();
         break;
@@ -569,6 +701,10 @@ export class Editor {
     if (cancel && a.kind === 'draw') { this.reqLive(); return; }
     switch (a.kind) {
       case 'draw':
+        // Un toque en una casilla la marca; si se arrastra el lápiz, se escribe con normalidad.
+        if (a.check && performance.now() - a.t0 < 500) {
+          const b = ink.unionBox([a.s]); if (Math.max(b.w, b.h) < 24 + a.s.w * 3) { this.toggleCheck(a.check); break; }
+        }
         this.snap();
         if (this.mr && this.recId) { a.s.ar = this.recId; a.s.at = Math.max(0, a.wall - this.recT0); }
         this.layer().objs.push(a.s);
@@ -627,7 +763,7 @@ export class Editor {
   updSelBox() {
     const box = this.ovl.querySelector('.selbox'); if (!box || !this.sel) return;
     const b = this.selBox(), z = this.z;
-    Object.assign(box.style, { left: b.x * z + 'px', top: b.y * z + 'px', width: b.w * z + 'px', height: b.h * z + 'px' });
+    Object.assign(box.style, { left: (b.x - this.X0) * z + 'px', top: (b.y - this.Y0) * z + 'px', width: b.w * z + 'px', height: b.h * z + 'px' });
   }
 
   drawSel() {
@@ -642,13 +778,15 @@ export class Editor {
       <button data-s="dup">${icon('dup')}Duplicar</button><button data-s="del">${icon('trash')}Borrar</button>
       <button data-s="layer">${icon('moveLayer')}Capa</button><button data-s="event">${icon('event')}Evento</button>
       <button data-s="todo">${icon('task')}Tarea</button><button data-s="head">${icon('listN')}Índice</button><button data-s="star">${icon('star')}Destacar</button>
-      ${this.sel.objs.some(o => o.ar) ? `<button data-s="listen">${icon('headphones')}Escuchar</button>` : ''}<button data-s="pick">${icon('picking')}Recorte</button></div>`);
+      ${this.sel.objs.length === 1 && this.sel.objs[0].t === 'c' ? `<button data-s="editck">${icon('checks')}Editar</button>` : ''}${this.sel.objs.some(o => o.ar) ? `<button data-s="listen">${icon('headphones')}Escuchar</button>` : ''}<button data-s="pick">${icon('picking')}Recorte</button></div>`);
     this.ovl.append(bar);
-    const bw = bar.offsetWidth, sw = W * z;
-    let top = b.y * z - bar.offsetHeight - 10;
-    if (top < 4) top = (b.y + b.h) * z + 12;
+    const inf = this.page.inf, bx = (b.x - this.X0) * z, by = (b.y - this.Y0) * z;
+    if (inf) bar.style.maxWidth = Math.min(700, this.sc.clientWidth - 16) + 'px';
+    const bw = bar.offsetWidth, lo = inf ? this.sc.scrollLeft : 0, hi = inf ? lo + this.sc.clientWidth : W * z;
+    let top = by - bar.offsetHeight - 10;
+    if (top < (inf ? this.sc.scrollTop : 0) + 4) top = by + b.h * z + 12;
     bar.style.top = top + 'px';
-    bar.style.left = Math.max(4, Math.min(b.x * z, sw - bw - 4)) + 'px';
+    bar.style.left = Math.max(lo + 4, Math.min(bx, hi - bw - 4)) + 'px';
     bar.onclick = e => { const x = e.target.closest('[data-s]'); if (x) this.selAction(x.dataset.s, x); };
     box.querySelector('.handle').addEventListener('pointerdown', e => this.startScale(e));
   }
@@ -719,6 +857,7 @@ export class Editor {
         toast(a === 'event' ? 'Evento añadido a la Agenda' : 'Tarea añadida a la Agenda');
         break;
       }
+      case 'editck': this.editCheck(objs[0]); break;
       case 'pick': await store.newPicking(this.selImage()); toast('Guardado en Recortes'); break;
       case 'head': case 'star': {
         const b = ink.unionBox(objs), img = this.selImage();
@@ -742,7 +881,7 @@ export class Editor {
         if (!this.aiReady()) return;
         const b = ink.unionBox(objs), img = this.selImage();
         const text = await this.aiBusy(() => AI.ask([{ text: AI.P.ocr }, AI.dataUrlPart(img.src)]));
-        if (text) this.aiResult('Texto reconocido', text, { x: b.x, y: Math.min(H - 120, b.y + b.h + 30) });
+        if (text) this.aiResult('Texto reconocido', text, { x: b.x, y: this.page.inf ? b.y + b.h + 30 : Math.min(H - 120, b.y + b.h + 30) });
         break;
       }
     }
@@ -803,11 +942,12 @@ export class Editor {
     ], { wide: true }).then(v => { if (v) this.insertText(v, at); });
   }
 
-  insertText(text, at = { x: 90, y: 110 }) {
+  insertText(text, at) {
+    if (!at) { const c = this.center(); at = this.page.inf ? { x: c.x - 400, y: c.y - 200 } : { x: 90, y: 110 }; }
     if (this.isLocked()) return toast('Página bloqueada');
     this.snap();
     const size = Math.min(settings.textSize, 32);
-    const o = { t: 'x', x: at.x, y: at.y, size, c: settings.pens[0].c, f: 'serif', w: Math.max(300, W - at.x - 60), text: text.trim(), paras: RT.fromPlain(text.trim()) };
+    const o = { t: 'x', x: at.x, y: at.y, size, c: settings.pens[0].c, f: 'serif', w: this.page.inf ? 800 : Math.max(300, W - at.x - 60), text: text.trim(), paras: RT.fromPlain(text.trim()) };
     this.layer().objs.push(o);
     this.tool = 'lasso'; this.updTools();
     this.renderInk(); this.select([o]); this.dirty();
@@ -891,7 +1031,9 @@ export class Editor {
     if (!CLIP) return;
     if (this.isLocked()) return toast('Página bloqueada');
     this.snap();
-    const c = CLIP.map(ink.clone); c.forEach(o => ink.translate(o, 40, 40));
+    const c = CLIP.map(ink.clone), bb = ink.unionBox(c), ce = this.center();
+    const off = this.page.inf || bb.x < 0 || bb.y < 0 || bb.x + bb.w > W || bb.y + bb.h > H;
+    c.forEach(o => ink.translate(o, off ? ce.x - bb.x - bb.w / 2 : 40, off ? ce.y - bb.y - bb.h / 2 : 40));
     this.layer().objs.push(...c);
     this.tool = 'lasso'; this.updTools();
     this.renderInk(); this.select(c); this.dirty();
@@ -905,10 +1047,16 @@ export class Editor {
       const b = ink.bbox(o);
       if (p.x >= b.x - 10 && p.x <= b.x + b.w + 10 && p.y >= b.y - 10 && p.y <= b.y + b.h + 10) hit = o;
     }
+    if (!hit) {
+      const c = this.checkAt(p);
+      if (c) { this.toggleCheck(c); return; }
+      const l = this.page.layers.filter(L => L.vis).flatMap(L => L.objs).find(o => o.t === 'c' && p.x >= o.x && p.x <= o.x + o.w && p.y >= o.y && p.y <= o.y + o.h);
+      if (l) { this.editCheck(l); return; }
+    }
     this.snap();
     let o = hit;
     if (hit) this.removeObjs([hit]);
-    else o = { t: 'x', x: p.x, y: p.y - settings.textSize * 0.65, size: settings.textSize, c: settings.pens[0].c, f: 'serif', w: Math.min(900, Math.max(300, W - p.x - 40)), paras: [{ runs: [], align: 'left', list: null }] };
+    else o = { t: 'x', x: p.x, y: p.y - settings.textSize * 0.65, size: settings.textSize, c: settings.pens[0].c, f: 'serif', w: Math.min(900, Math.max(300, this.X0 + this.PW - p.x - 40)), paras: [{ runs: [], align: 'left', list: null }] };
     RT.normalize(o);
     if (!o.w) o.w = Math.max(300, ink.bbox(o).w + 40);
     this.renderInk();
@@ -919,7 +1067,7 @@ export class Editor {
     Object.assign(ed.style, { fontSize: o.size + 'px', color: o.c || '#141414', fontFamily: RT.FAM[o.f || 'serif'], transform: `scale(${z})` });
     const place = () => {
       ed.style.width = o.w + 'px';
-      Object.assign(wrap.style, { left: o.x * z + 'px', top: o.y * z + 'px', width: o.w * z + 'px', height: ed.offsetHeight * z + 'px' });
+      Object.assign(wrap.style, { left: (o.x - this.X0) * z + 'px', top: (o.y - this.Y0) * z + 'px', width: o.w * z + 'px', height: ed.offsetHeight * z + 'px' });
     };
     ed.addEventListener('input', place);
     this.ovl.append(wrap); place();
@@ -927,7 +1075,7 @@ export class Editor {
       e.preventDefault(); e.stopPropagation();
       const hd = e.currentTarget, x0 = e.clientX, w0 = o.w;
       hd.setPointerCapture(e.pointerId);
-      const mv = ev => { o.w = Math.max(120, Math.min(W - o.x, w0 + (ev.clientX - x0) / z)); place(); };
+      const mv = ev => { o.w = Math.max(120, Math.min(this.X0 + this.PW - o.x, w0 + (ev.clientX - x0) / z)); place(); };
       const up = () => { hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); };
       hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up);
     });
@@ -1075,14 +1223,50 @@ export class Editor {
   async insertImages() {
     if (this.isLocked()) return toast('Página bloqueada');
     const files = await pickFiles('image/*', true);
+    await this.addImages(files);
+  }
+
+  imageMenu(btn) {
+    if (this.isLocked()) return toast('Página bloqueada');
+    menu(btn, [
+      { icon: 'image', label: 'Elegir foto (galería y Google Fotos)', run: () => this.insertImages() },
+      { icon: 'camera', label: 'Hacer una foto', run: () => this.takePhoto() },
+      { icon: 'share', label: 'Abrir Google Fotos y compartir aquí', run: () => this.photosHelp() },
+      { icon: 'paste', label: 'Pegar imagen copiada', run: () => this.pasteImage() }
+    ], { side: this.side() });
+  }
+  takePhoto() {
+    const i = h('<input type="file" accept="image/*" capture="environment" style="display:none">');
+    i.onchange = () => { this.addImages([...i.files]); i.remove(); };
+    document.body.append(i); i.click();
+  }
+  async photosHelp() {
+    await this.flushSave();
+    const ok = await modal('Traer fotos de Google Fotos', `<ol class="steps"><li>Se abre Google Fotos. Elige una o varias fotos.</li><li>Pulsa <b>Compartir</b> y elige <b>Cuaderno</b>.</li><li>Vuelves aquí y la foto se pone en esta página.</li></ol><p class="sub">Necesita la app instalada en la tablet («Instalar app» en Chrome). Si «Cuaderno» no sale entre las opciones, pulsa «Más» o vuelve a instalarla.</p>`,
+      [{ label: 'Cancelar', value: false }, { label: 'Abrir Google Fotos', pri: true, value: () => { window.open('https://photos.google.com/', '_blank', 'noopener'); return true; } }]);
+    if (ok) try { localStorage.setItem('shareTo', JSON.stringify({ nb: this.nb.id, pid: this.page.id, t: Date.now() })); } catch (e) { /* sin almacenamiento */ }
+  }
+  async pasteImage() {
+    try {
+      for (const it of await navigator.clipboard.read()) {
+        const type = it.types.find(t => t.startsWith('image/'));
+        if (type) return this.addImages([new File([await it.getType(type)], 'pegada')]);
+      }
+      toast('No hay ninguna imagen copiada');
+    } catch (e) { toast('El navegador no permite pegar imágenes aquí'); }
+  }
+
+  async addImages(files) {
     if (!files.length) return;
+    if (this.isLocked()) return toast('Página bloqueada');
     this.snap();
     const objs = [];
     for (const f of files) {
       try {
         const im = await store.fileToImage(f);
         const o = store.imageObj(im.src, im.w, im.h, { max: 0.6 });
-        ink.translate(o, objs.length * 30, objs.length * 30);
+        const ce = this.center();
+        ink.translate(o, ce.x - W / 2 + objs.length * 30, ce.y - H / 2 + objs.length * 30);
         await ink.loadImage(o.src);
         this.layer().objs.push(o); objs.push(o);
       } catch (e) { toast('No se pudo abrir ' + f.name); }
@@ -1091,14 +1275,47 @@ export class Editor {
     this.renderInk(); this.select(objs); this.dirty();
   }
 
+  // ---------------- listas con casillas ----------------
+  checkAt(p) {
+    for (const L of [...this.page.layers].reverse()) if (L.vis) for (const o of L.objs) if (o.t === 'c') { const i = CK.boxAt(o, p); if (i >= 0) return { o, i }; }
+    return null;
+  }
+  toggleCheck({ o, i }) {
+    this.snap();
+    o.items[i].done = !o.items[i].done;
+    this.clearSel(); this.renderInk(); this.dirty();
+  }
+  async newCheck() {
+    if (this.isLocked()) return toast('Página bloqueada');
+    const r = await CK.edit(null); if (!r) return;
+    this.snap();
+    const c = this.center(), size = Math.max(26, Math.min(44, settings.textSize));
+    const o = { t: 'c', x: this.page.inf ? c.x - 400 : 110, y: this.page.inf ? c.y - 200 : 140, w: 800, h: 0, size, c: settings.pens[0].c === '#ffffff' ? '#141414' : settings.pens[0].c, title: r.title, items: r.items };
+    o.h = CK.layout(o).h;
+    this.layer().objs.push(o);
+    this.tool = 'lasso'; this.updTools();
+    this.renderInk(); this.select([o]); this.dirty();
+    toast('Lista insertada: arrástrala para colocarla. Toca una casilla para marcarla.', 4000);
+  }
+  async editCheck(o) {
+    if (this.isLocked()) return toast('Página bloqueada');
+    const r = await CK.edit(o); if (!r) return;
+    this.snap();
+    o.title = r.title; o.items = r.items; o.h = CK.layout(o).h;
+    this.renderInk(); this.drawSel(); this.dirty();
+  }
+
   // ---------------- acciones de barra ----------------
   async action(a, btn) {
     if (this.editingText && a !== 'undo') this.editingText();
     switch (a) {
-      case 'exit': history.length > 1 ? history.back() : (location.hash = '#/home'); break;
+      case 'exit': if (this.opts.split) { this.opts.onClose(this); break; } history.length > 1 ? history.back() : (location.hash = '#/home'); break;
       case 'undo': this.doUndo(); break;
       case 'redo': this.doRedo(); break;
-      case 'image': this.insertImages(); break;
+      case 'image': this.imageMenu(btn); break;
+      case 'check': this.newCheck(); break;
+      case 'split': this.opts.onSplit?.(this, btn); break;
+      case 'full': this.opts.onFull?.(); break;
       case 'ai': this.aiMenu(btn); break;
       case 'layers': this.layersPop(btn); break;
       case 'tpl': this.tplPop(btn); break;
@@ -1124,7 +1341,7 @@ export class Editor {
   }
 
   key(e) {
-    if (e.target.closest && e.target.closest('input,textarea')) return;
+    if (ACTIVE !== this || (e.target.closest && e.target.closest('input,textarea'))) return;
     const k = e.key.toLowerCase();
     if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? this.doRedo() : this.doUndo(); }
     else if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); this.doRedo(); }
@@ -1194,7 +1411,7 @@ export class Editor {
             if (p) { p.tpl = t.id; await db.put('pages', p); }
           }
         }
-        await this.renderBg(); this.dirty();
+        await this.renderBg(); for (const e of this.samePage()) e.renderBg(); this.dirty();
       };
       grid.append(b);
     }
@@ -1231,7 +1448,7 @@ export class Editor {
             const c = { ...JSON.parse(JSON.stringify(p)), id: uid() };
             await db.put('pages', c); nb.pages.splice(i + 1, 0, c.id); await db.put('notebooks', nb);
             if (i < this.idx) this.idx++;
-            reload(); this.updTop();
+            reload(); this.updTop(); this.tellPeers();
           } },
           i > 0 && { icon: 'up', label: 'Mover antes', run: () => this.movePage(i, i - 1).then(reload) },
           i < nb.pages.length - 1 && { icon: 'down', label: 'Mover después', run: () => this.movePage(i, i + 1).then(reload) },
@@ -1254,12 +1471,13 @@ export class Editor {
     this.idx = nb.pages.indexOf(cur);
     nb.last = this.idx;
     await db.put('notebooks', nb);
-    this.updTop();
+    this.updTop(); this.tellPeers();
   }
 
   async deletePage(i) {
     const nb = this.nb, id = nb.pages[i], cur = nb.pages[this.idx];
     nb.pages.splice(i, 1);
+    for (const e of this.peers()) if (e.page?.id === id) { clearTimeout(e.saveT); e.saveT = 0; }
     await db.del('pages', id);
     if (id === cur) {
       this.saveT && clearTimeout(this.saveT); this.saveT = 0;
@@ -1271,11 +1489,28 @@ export class Editor {
       await db.put('notebooks', nb);
       this.updTop();
     }
+    await this.tellPeers();
+  }
+
+  // Página normal ↔ infinita.
+  async toggleInf() {
+    const p = this.page;
+    if (p.inf) {
+      const a = pageArea(p);
+      if ((a.x < -70 || a.y < -70 || a.x + a.w > W + 70 || a.y + a.h > H + 70) && !await confirm('¿Volver a página normal?', 'Volver', 'Lo que quede fuera de la hoja no se verá, pero no se borra: reaparece si la haces infinita otra vez.')) return;
+      delete p.inf;
+    } else p.inf = true;
+    this.dirty();
+    const all = [this, ...this.samePage()];
+    for (const e of all) { e.ext = null; e.sc.classList.toggle('inf', !!p.inf); if (!p.inf) e.zMul = 1; e.fit(); if (p.inf) e.goHome(); e.updTop(); }
+    toast(p.inf ? 'Página infinita: desplázate y escribe hacia cualquier lado' : 'Página normal');
   }
 
   moreMenu(btn) {
     const nb = this.nb, p = this.page;
     menu(btn, [
+      !p.pdf && { icon: 'inf', label: p.inf ? 'Volver a página normal' : 'Hacer infinita esta página', run: () => this.toggleInf() },
+      p.inf && { icon: 'zout', label: 'Ver todo lo escrito', run: () => this.goAll() },
       { icon: 'pen2', label: 'Renombrar cuaderno', run: async () => {
         const r = await prompt('Renombrar', [{ name: 't', label: 'Nombre', value: nb.title }]);
         if (r && r.t.trim()) { nb.title = r.t.trim(); await db.put('notebooks', nb); this.updTop(); }

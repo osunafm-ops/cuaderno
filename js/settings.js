@@ -31,6 +31,10 @@ export const settings = {
   // Gemini (IA): la clave se guarda solo en esta tablet
   aiKey: '',
   aiModel: '',
+  // Office 365 (solo lectura)
+  msClientId: '', msConnected: false, msLast: null,
+  // Copia de seguridad de cada noche
+  bkOn: true, bkHour: 3, bkDrive: true, deviceName: '',
   pin: ''          // huella SHA-256 del PIN (vacío = sin bloqueo)
 };
 

@@ -13,9 +13,11 @@ import * as G from './google.js';
 import * as sync from './sync.js';
 import * as AI from './ai.js';
 import * as FD from './folders.js';
+import * as BK from './backup.js';
+import * as MS from './ms.js';
 
 const app = document.getElementById('app');
-let editor = null, timer = null, installEvt = null;
+let editor = null, panes = [], timer = null, installEvt = null;
 
 const NAV = [
   ['home', 'Inicio', 'home'], ['papel', 'Cuadernos', 'notebook'], ['agenda', 'Agenda', 'calendar'],
@@ -71,6 +73,7 @@ async function connectGoogle() {
     toast('Conectado con Google. Sincronizando…');
     await sync.syncNow();
     if (sync.state.status === 'ok') toast('Sincronizado');
+    BK.run().catch(e => console.warn('Copia', e));
   } catch (e) { toast(e.message || 'No se pudo conectar', 5000); sync.refreshState(); }
 }
 async function cloudTap() {
@@ -120,18 +123,30 @@ async function quickMemo() {
 }
 
 // ---------------- navegación ----------------
-async function route() {
+async function doRoute() {
   clearInterval(timer); timer = null;
   closePop();
   document.querySelectorAll('.modal-bg').forEach(m => m.remove());
-  if (editor) { const e = editor; editor = null; await e.destroy(); }
-  const [, r, a, b] = location.hash.split('/');
+  const old = panes; panes = []; editor = null;
+  for (const e of old) await e.destroy();
+  const [, r, a, b, c, d] = location.hash.split('/');
+  if (r !== 'ed') setZen(false);
   if (r === 'ed') {
     const nb = await db.get('notebooks', a);
     if (!nb) return go('#/home');
     main.hidden = true; edroot.hidden = false;
-    editor = new Editor(edroot, nb, b !== undefined ? +b : undefined);
-    await editor.init();
+    const nb2 = c ? (c === a ? nb : await db.get('notebooks', c)) : null;
+    edroot.innerHTML = ''; edroot.classList.toggle('two', !!nb2);
+    const mk = async (n, i, right) => {
+      const host = h('<div class="edpane"></div>');
+      edroot.append(host);
+      const e = new Editor(host, n, i !== undefined ? +i : undefined, { split: !!nb2, right: nb2 ? right : undefined, onSplit: splitMenu, onClose: closePane, onFull: toggleFull, onActive: setActive });
+      panes.push(e);
+      await e.init();
+      return e;
+    };
+    editor = await mk(nb, b, false);
+    if (nb2) { await mk(nb2, d, true); setActive(editor); }
     flash();
     return;
   }
@@ -142,7 +157,71 @@ async function route() {
   await VIEWS[key](view, a);
   flash();
 }
+// Los cambios de pantalla van de uno en uno, para no mezclar dos aperturas a la vez.
+let routing = Promise.resolve();
+const route = () => (routing = routing.then(doRoute).catch(e => console.error(e)));
 addEventListener('hashchange', route);
+
+// ---------------- dos páginas a la vez y pantalla completa ----------------
+function setActive(e) {
+  editor = e;
+  for (const p of panes) p.root.classList.toggle('act', p === e && panes.length > 1);
+}
+const setHash = hash => { history.replaceState(null, '', hash); return route(); };
+const refOf = e => `${e.nb.id}/${e.idx}`;
+
+function closePane(e) {
+  const keep = panes.find(p => p !== e);
+  if (keep) setHash('#/ed/' + refOf(keep));
+}
+
+async function splitMenu(e, btn) {
+  const other = panes.find(p => p !== e), nb = e.nb;
+  const open = (id, i) => setHash(other
+    ? '#/ed/' + (panes[0] === e ? `${id}/${i}/${refOf(other)}` : `${refOf(other)}/${id}/${i}`)
+    : `#/ed/${refOf(e)}/${id}/${i}`);
+  const word = other ? 'Poner aquí' : 'Abrir al lado';
+  menu(btn, [
+    { icon: 'pages', label: `${word} otra página de este cuaderno`, run: () => pickPage(nb, i => open(nb.id, i), e.idx) },
+    { icon: 'notebook', label: `${word} otro cuaderno…`, run: () => pickNotebook(n => n.pages.length > 1 ? pickPage(n, i => open(n.id, i), n.last || 0) : open(n.id, 0)) },
+    other && { icon: 'repeat', label: 'Cambiar de lado', run: () => setHash(`#/ed/${refOf(panes[1])}/${refOf(panes[0])}`) },
+    other && { icon: 'x', label: 'Cerrar este lado', run: () => closePane(e) }
+  ]);
+}
+
+async function pickPage(nb, done, cur) {
+  for (const p of panes) await p.flushSave();
+  const pages = await Promise.all(nb.pages.map(id => db.get('pages', id)));
+  const el = h(`<div class="pgview"><div class="pgrid">${pages.map((p, i) => `<div class="pth ${i === cur ? 'on' : ''}" data-i="${i}"><button class="im" style="${p?.thumb ? `background-image:url(${p.thumb})` : ''}">${p?.thumb ? '' : `<span class="sub">${p?.pdf ? 'Pág. ' + p.pdf : 'Vacía'}</span>`}</button><div class="row"><span>${i + 1}</span></div></div>`).join('')}</div></div>`);
+  let close;
+  el.addEventListener('click', ev => { const b = ev.target.closest('[data-i]'); if (b) { close(); done(+b.dataset.i); } });
+  modal('Elige una página · ' + nb.title, el, [{ label: 'Cancelar', value: null }], { wide: true, mount: c => { close = c; } });
+}
+
+async function pickNotebook(done) {
+  const rec = await store.getRecent();
+  const list = (await db.all('notebooks')).filter(n => !FD.isFolder(n)).sort((a, b) => b.updated - a.updated);
+  list.sort((a, b) => (rec.indexOf(a.id) + 1 || 99) - (rec.indexOf(b.id) + 1 || 99));
+  const el = h(`<div><label class="search" style="margin-bottom:12px">${icon('search')}<input placeholder="Buscar cuaderno"></label><div class="list"></div></div>`);
+  const box = el.querySelector('.list');
+  const draw = q => { box.innerHTML = list.filter(n => n.title.toLowerCase().includes(q)).slice(0, 60).map(n => `<button class="li" data-id="${n.id}" style="width:100%;text-align:left">${icon(KIND_ICON[n.kind])}<span class="tx">${esc(n.title)}</span><div class="grow"></div><span class="sub">${KIND_NAME[n.kind]} · ${n.pages.length} pág.</span></button>`).join('') || '<div class="li sub">Nada coincide</div>'; };
+  draw('');
+  el.querySelector('input').oninput = e => draw(e.target.value.trim().toLowerCase());
+  let close;
+  box.onclick = e => { const b = e.target.closest('[data-id]'); if (b) { close(); done(list.find(n => n.id === b.dataset.id)); } };
+  modal('Elige un cuaderno', el, [{ label: 'Cancelar', value: null }], { wide: true, mount: c => { close = c; } });
+}
+
+function setZen(on) {
+  document.documentElement.classList.toggle('zen', on);
+  if (!on && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+function toggleFull() {
+  const on = !document.documentElement.classList.contains('zen');
+  setZen(on);
+  if (on) document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {});
+}
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) document.documentElement.classList.remove('zen'); });
 
 // ---------------- piezas comunes ----------------
 function cover(nb, meta) {
@@ -221,7 +300,7 @@ VIEWS.home = async v => {
   const recent = (await store.getRecent()).map(id => nbs.find(n => n.id === id)).filter(Boolean).slice(0, 6);
   const evs = (await db.all('events')).filter(e => e.date === today).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
   const tds = (await db.all('todos')).filter(t => t.date === today || (!t.done && t.date < today));
-  const ext = settings.gCalShow ? sync.extOn(await sync.externalEvents(), today) : [];
+  const ext = sync.extOn(await extAll(), today);
   const count = k => nbs.filter(n => n.kind === k).length;
   const stars = nbs.flatMap(n => (n.marks || []).filter(m => m.type === 'star' && n.pages.includes(m.pid)).map(m => ({ ...m, nb: n, pi: n.pages.indexOf(m.pid) }))).slice(-8).reverse();
   const tiles = [
@@ -370,11 +449,12 @@ async function newNotebookDialog(parent = '') {
     <div class="field"><span>Plantilla</span></div></div>`);
   const tp = tplPicker(settings.defaultTpl);
   body.append(tp);
+  body.append(h(`<label class="row sub" style="margin-top:14px;gap:8px"><input type="checkbox" name="inf"> ${icon('inf', 'inl')} Página infinita (se puede escribir hacia cualquier lado)</label>`));
   const r = await modal('Nuevo cuaderno', body, [{ label: 'Cancelar', value: null },
-    { label: 'Crear', pri: true, value: mb => ({ t: mb.querySelector('[name=t]').value.trim() || 'Cuaderno', tpl: tp.dataset.sel }) }], { wide: true });
+    { label: 'Crear', pri: true, value: mb => ({ t: mb.querySelector('[name=t]').value.trim() || 'Cuaderno', tpl: tp.dataset.sel, inf: mb.querySelector('[name=inf]').checked }) }], { wide: true });
   if (!r) return;
   settings.defaultTpl = r.tpl; saveSettings();
-  const nb = await store.newNotebook('paper', r.t, { tpl: r.tpl, extra: { parent } });
+  const nb = await store.newNotebook('paper', r.t, { tpl: r.tpl, extra: { parent }, page: r.inf ? { inf: true } : {} });
   openNb(nb);
 }
 
@@ -386,12 +466,16 @@ const weekStart = k => { const d = fromKey(k); d.setDate(d.getDate() - ((d.getDa
 const toMin = t => { const [hh, mm] = String(t || '0:0').split(':').map(Number); return (hh || 0) * 60 + (mm || 0); };
 const fromMin = m => `${pad(Math.floor(m / 60) % 24)}:${pad(m % 60)}`;
 
+async function extAll() {
+  return [...(settings.gCalShow && G.granted('calRead') ? await sync.externalEvents() : []), ...await MS.events()];
+}
+
 async function agendaData() {
   return {
     events: await db.all('events'),
     todos: await db.all('todos'),
     dailies: (await db.all('notebooks')).filter(n => n.kind === 'daily'),
-    ext: settings.gCalShow && G.granted('calRead') ? await sync.externalEvents() : []
+    ext: await extAll()
   };
 }
 
@@ -483,7 +567,7 @@ VIEWS.agenda = async (v, a) => {
       <button class="ib" data-m="-1" title="Anterior">${icon('left')}</button><b class="mon">${esc(title)}</b><button class="ib" data-m="1" title="Siguiente">${icon('right')}</button>
       <button class="btn sm ghost" data-m="0">Hoy</button><button class="btn sm pri addany">${icon('plus')} Nuevo</button></div>
     ${body}
-    <p class="sub legend"><i class="e"></i> tus eventos <i class="t"></i> tareas <i class="p"></i> página escrita${D.ext.length ? ' <i class="g"></i> tus calendarios de Google' : ''}</p></div>`;
+    <p class="sub legend"><i class="e"></i> tus eventos <i class="t"></i> tareas <i class="p"></i> página escrita${D.ext.length ? ' <i class="g"></i> tus calendarios de Google y Office 365' : ''}</p></div>`;
 
   v.querySelectorAll('.vsel button').forEach(b => { b.classList.toggle('on', b.dataset.v === view); b.onclick = () => { CAL.view = b.dataset.v; route(); }; });
   v.querySelectorAll('[data-m]').forEach(b => b.onclick = () => {
@@ -549,7 +633,7 @@ function agendaItem(it, anchor) {
       <div class="li"><i class="cdot" style="background:${esc(ref.color)}"></i><span>${esc(ref.calName)}</span></div>
       <div class="li">${icon('clock')}<span>${cap(fmtDate(fromKey(ref.date), { weekday: 'long', day: 'numeric', month: 'long' }))} · ${ref.time ? esc(ref.time) + (ref.endTime ? '–' + esc(ref.endTime) : '') : 'Todo el día'}</span></div>
       ${ref.loc ? `<div class="li">${icon('home')}<span>${esc(ref.loc)}</span></div>` : ''}</div>
-      <p class="sub">Evento de tu Google Calendar: se cambia desde Google Calendar.</p>`);
+      <p class="sub">${ref.src === 'ms' ? 'Evento de tu calendario de Office 365: se cambia desde Outlook.' : 'Evento de tu Google Calendar: se cambia desde Google Calendar.'}</p>`);
     return;
   }
   if (it.kind === 'todo') {
@@ -653,6 +737,39 @@ VIEWS.recortes = async v => {
   const g = v.querySelector('.covers'); if (g) bindCovers(g, list, () => route());
 };
 
+// ---- Fotos que llegan con «Compartir» (Google Fotos, galería…) ----
+VIEWS.compartir = async v => {
+  const c = await caches.open('cuaderno-compartir');
+  const files = [];
+  for (const k of await c.keys()) files.push(new File([await (await c.match(k)).blob()], 'foto'));
+  history.replaceState(null, '', '#/compartir');
+  if (!files.length) return go('#/home');
+  const clear = async () => { for (const k of await c.keys()) await c.delete(k); };
+  let to = null; try { to = JSON.parse(localStorage.getItem('shareTo') || 'null'); localStorage.removeItem('shareTo'); } catch (e) { /* sin almacenamiento */ }
+  const put = async (nb, i) => {
+    location.hash = `#/ed/${nb.id}/${i}`;
+    for (let k = 0; k < 100 && !(editor && editor.nb.id === nb.id && editor.page); k++) await new Promise(r => setTimeout(r, 50));
+    if (editor?.page) { await editor.addImages(files); await editor.flushSave(); if (!editor.isLocked()) await clear(); }
+  };
+  if (to && Date.now() - to.t < 30 * 60000) {
+    const nb = await db.get('notebooks', to.nb), i = nb ? nb.pages.indexOf(to.pid) : -1;
+    if (i >= 0) { setTimeout(() => put(nb, i)); return; }
+  }
+  const last = await db.get('notebooks', (await store.getRecent())[0] || '-');
+  v.innerHTML = `<h1>${files.length === 1 ? 'Foto recibida' : files.length + ' fotos recibidas'}</h1><p class="sub intro">¿Dónde la quieres poner?</p>
+    <div class="row" style="flex-wrap:wrap;gap:10px">${last ? `<button class="btn pri" data-w="last">${icon('notebook')} En «${esc(last.title)}»</button>` : ''}
+    <button class="btn" data-w="pick">${icon('pages')} Elegir cuaderno</button><button class="btn" data-w="memo">${icon('memo')} En una nota nueva</button><button class="btn" data-w="rec">${icon('picking')} En Recortes</button><button class="btn ghost" data-w="no">Descartar</button></div>
+    <div class="row" style="flex-wrap:wrap;gap:10px;margin-top:20px">${files.map(f => `<img src="${URL.createObjectURL(f)}" alt="" style="max-height:180px;border-radius:10px;border:1px solid var(--line2)">`).join('')}</div>`;
+  v.querySelectorAll('[data-w]').forEach(b => b.onclick = async () => {
+    const w = b.dataset.w;
+    if (w === 'last') put(last, last.last || 0);
+    if (w === 'pick') pickNotebook(n => n.pages.length > 1 ? pickPage(n, i => put(n, i), n.last || 0) : put(n, 0));
+    if (w === 'memo') put(await store.newNotebook('memo', 'Foto · ' + fmtDate(Date.now()), { tpl: 'blanco' }), 0);
+    if (w === 'rec') { for (const f of files) await store.newPicking(await store.fileToImage(f)); await clear(); go('#/recortes'); }
+    if (w === 'no') { await clear(); go('#/home'); }
+  });
+};
+
 // ---- Notas rápidas ----
 VIEWS.notas = async v => {
   const list = (await db.all('notebooks')).filter(n => n.kind === 'memo').sort((a, b) => b.updated - a.updated);
@@ -718,6 +835,11 @@ VIEWS.ajustes = async v => {
     ${settings.gConnected && !G.granted('calRead') ? `<div class="set"><div class="tx">Permiso para ver tus calendarios<small>Pulsa y acepta el nuevo permiso de Google («Ver tus calendarios»).</small></div><button class="btn sm pri gperm">${icon('calendar')} Dar permiso</button></div>` : ''}
     <details class="set gid"><summary class="tx">ID de cliente de Google<small>${G.clientId() ? 'Configurado: …' + esc(G.clientId().slice(-34)) : 'Falta configurarlo (ver guía de registro).'}</small></summary>
       <div class="row" style="width:100%;margin-top:10px"><input class="gcid" placeholder="xxxxxxxx.apps.googleusercontent.com" value="${esc(settings.gClientId)}" style="flex:1;padding:10px;border:1.5px solid var(--line2);border-radius:10px;background:var(--paper);color:var(--ink)"><button class="btn sm gsave">Guardar</button></div></details>
+    <h2>Calendario de Office 365</h2>
+    <div class="set"><div class="tx">Estado<small>${settings.msConnected ? (MS.needsLogin() ? 'Hay que volver a conectar.' : 'Conectado' + (settings.msLast ? ' · actualizado ' + fmtDate(settings.msLast, { day: 'numeric', month: 'short' }) + ' ' + fmtTime(settings.msLast) : '')) : 'Sin conectar. Muestra en la Agenda e Inicio los eventos de tu calendario de Outlook / Office 365. Solo se ven: no se modifican.'} Microsoft pide volver a entrar cada 24 horas.</small></div>
+      ${settings.msConnected ? `<button class="btn sm pri mssync">${icon('repeat')} Actualizar</button>${MS.needsLogin() ? `<button class="btn sm pri msin">Volver a conectar</button>` : ''}<button class="btn sm ghost msout">Desconectar</button>` : `<button class="btn sm pri msin" ${MS.clientId() ? '' : 'disabled style="opacity:.45"'}>${icon('calendar')} Conectar con Office 365</button>`}</div>
+    <details class="set gid"><summary class="tx">ID de aplicación de Microsoft<small>${MS.clientId() ? 'Configurado: …' + esc(MS.clientId().slice(-12)) : 'Falta configurarlo: ver GUIA-OFFICE365. También hay una forma sencilla sin registrar nada (a través de Google Calendar).'}</small></summary>
+      <div class="row" style="width:100%;margin-top:10px"><input class="mscid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${esc(settings.msClientId)}" style="flex:1;padding:10px;border:1.5px solid var(--line2);border-radius:10px;background:var(--paper);color:var(--ink)"><button class="btn sm mssave">Guardar</button></div></details>
     <h2>Inteligencia artificial (Gemini)</h2>
     <div class="set"><div class="tx">Clave de Gemini<small>${settings.aiKey ? 'Configurada en esta tablet.' : 'Créala gratis en Google AI Studio con tu cuenta y pégala aquí.'} Se guarda solo en esta tablet. Al usar la IA, la página o el audio se envían a Google; en la modalidad gratuita Google puede usarlos para mejorar sus productos.</small>
       <div class="row" style="margin-top:10px"><input class="aikey" type="password" placeholder="Pega aquí la clave de Gemini" value="${esc(settings.aiKey)}" style="flex:1;min-width:220px;padding:10px;border:1.5px solid var(--line2);border-radius:10px;background:var(--paper);color:var(--ink)">
@@ -729,13 +851,34 @@ VIEWS.ajustes = async v => {
       ${settings.pin ? `<button class="btn sm ghost pinoff">Quitar PIN</button>` : `<button class="btn sm pinon">${icon('lockKey')} Poner PIN</button>`}</div>
     <h2>Datos</h2>
     <div class="set"><div class="tx">Almacenamiento<small>${est || 'Todo se guarda solo en esta tablet, en el navegador.'} ${persisted ? '· protegido contra borrado automático' : ''}</small></div></div>
-    <div class="set"><div class="tx">Copia de seguridad<small>Descarga un archivo con todos tus cuadernos, agenda y audios. Guárdalo en Drive de vez en cuando.</small></div><button class="btn sm exp">${icon('download')} Exportar</button><button class="btn sm ghost imp">${icon('upload')} Restaurar</button></div>
+    ${tog('bkOn', 'Copia de seguridad cada noche', 'Se hace sola a la hora elegida si la app está abierta; si no, en cuanto la abras. Se guardan las 3 últimas en la tablet.')}
+    ${tog('bkDrive', 'Guardarla también en Google Drive', 'En la carpeta «Cuaderno (copias de seguridad)», las 14 últimas. Se sube cuando la sesión de Google está activa; si no, al tocar la nube.')}
+    <div class="set"><div class="tx">Hora y nombre de esta tablet<small class="bkst">…</small></div><select class="bkh" style="padding:9px;border:1.5px solid var(--line2);border-radius:10px;background:var(--paper);color:var(--ink)">${[0, 1, 2, 3, 4, 5, 6, 21, 22, 23].map(x => `<option value="${x}" ${x === settings.bkHour ? 'selected' : ''}>${pad(x)}:00</option>`).join('')}</select>
+      <input class="bkn" placeholder="Nombre (p. ej. tablet-casa)" value="${esc(settings.deviceName)}" style="width:170px;padding:9px;border:1.5px solid var(--line2);border-radius:10px;background:var(--paper);color:var(--ink)"></div>
+    <div class="set"><div class="tx">Copias guardadas<small>Para recuperar una copia anterior.</small></div><button class="btn sm pri bknow">${icon('download')} Hacer copia ahora</button><button class="btn sm ghost bklist">Ver copias</button></div>
+    <div class="set"><div class="tx">Copia en un archivo<small>Descarga un archivo con todos tus cuadernos, agenda y audios. Guárdalo en Drive de vez en cuando.</small></div><button class="btn sm exp">${icon('download')} Exportar</button><button class="btn sm ghost imp">${icon('upload')} Restaurar</button></div>
     ${installEvt ? `<div class="set"><div class="tx">Instalar la app<small>Añade Cuaderno a la pantalla de inicio de la tablet.</small></div><button class="btn sm pri inst">Instalar</button></div>` : ''}
     <div class="set"><div class="tx">Borrar todo<small>Elimina todos los datos de esta app en esta tablet.</small></div><button class="btn sm danger wipe">${icon('trash')} Borrar</button></div>
     <p class="sub" style="margin-top:24px">Cuaderno · app web que funciona sin conexión. Tus datos se quedan en la tablet (y en tu Drive si sincronizas); la IA solo envía a Google lo que le pidas.</p>`;
   v.querySelectorAll('.sw-toggle').forEach(b => b.onclick = () => { settings[b.dataset.k] = !settings[b.dataset.k]; saveSettings(); b.classList.toggle('on'); });
   v.querySelectorAll('.seg[data-k]').forEach(s => s.onclick = e => { const b = e.target.closest('[data-v]'); if (!b) return; settings[s.dataset.k] = b.dataset.v; saveSettings(); s.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); });
   G.prepare().catch(() => {});
+  v.querySelector('.msin')?.addEventListener('click', () => MS.signIn().catch(e => toast(e.message, 5000)));
+  v.querySelector('.mssync')?.addEventListener('click', async () => { const t = toast('Actualizando…', 60000); try { await MS.refresh(); } catch (e) { toast(e.message, 5000); } finally { t.remove(); route(); } });
+  v.querySelector('.msout')?.addEventListener('click', async () => { if (await confirm('¿Desconectar Office 365 en esta tablet?', 'Desconectar')) { await MS.signOut(); route(); } });
+  v.querySelector('.mssave').onclick = () => { settings.msClientId = v.querySelector('.mscid').value.trim(); saveSettings(); toast('ID guardado'); route(); };
+  BK.getState().then(s => {
+    const when = t => t ? fmtDate(t, { day: 'numeric', month: 'short' }) + ' ' + fmtTime(t) : 'todavía no';
+    const el = v.querySelector('.bkst'); if (el) el.textContent = `Última copia en la tablet: ${when(s.local)} · en Drive: ${when(s.drive)}${s.error ? ' · Aviso: ' + s.error : ''}`;
+  }).catch(() => {});
+  v.querySelector('.bkh').onchange = e => { settings.bkHour = +e.target.value; saveSettings(); toast('Hora guardada'); };
+  v.querySelector('.bkn').onchange = e => { settings.deviceName = e.target.value.trim().replace(/[^\wáéíóúñ-]+/gi, '-').slice(0, 24); saveSettings(); toast('Nombre guardado'); };
+  v.querySelector('.bknow').onclick = async () => {
+    const t = toast('Haciendo la copia…', 120000);
+    try { const r = await BK.run(true); toast(r === 'drive' ? 'Copia guardada en la tablet y en Drive' : 'Copia guardada en la tablet' + (settings.bkDrive ? ' (Drive: falta conectar con Google)' : ''), 4000); }
+    catch (e) { toast(e.message, 6000); } finally { t.remove(); route(); }
+  };
+  v.querySelector('.bklist').onclick = backupsDialog;
   v.querySelector('.gin')?.addEventListener('click', async () => { await connectGoogle(); route(); });
   v.querySelector('.gperm')?.addEventListener('click', async () => { await connectGoogle(); route(); });
   v.querySelector('.gsync')?.addEventListener('click', async () => { await cloudTap(); route(); });
@@ -771,7 +914,7 @@ VIEWS.ajustes = async v => {
   v.querySelector('.imp').onclick = async () => {
     const [f] = await pickFiles('application/json,.json'); if (!f) return;
     if (!await confirm('¿Restaurar esta copia?', 'Restaurar', 'Se reemplazarán TODOS los datos actuales por los de la copia.')) return;
-    try { await store.importAll(f); toast('Copia restaurada'); await loadSettings(); route(); } catch (e) { toast(e.message || 'Archivo no válido'); }
+    try { await restoreFile(f); } catch (e) { toast(e.message || 'Archivo no válido'); }
   };
   v.querySelector('.inst')?.addEventListener('click', async () => { installEvt.prompt(); installEvt = null; route(); });
   v.querySelector('.wipe').onclick = async () => {
@@ -780,6 +923,35 @@ VIEWS.ajustes = async v => {
     toast('Datos borrados'); go('#/home');
   };
 };
+
+async function restoreFile(f) {
+  // Antes de tocar nada se guarda una copia de lo que hay ahora.
+  const copy = new Blob([await f.arrayBuffer()], { type: 'application/json' }); // por si la copia elegida es la que se va a renovar
+  await BK.safety();
+  await store.importAll(copy);
+  await loadSettings();
+  toast('Copia restaurada'); route();
+}
+
+async function backupsDialog() {
+  const loc = await BK.list();
+  let drv = [], note = '';
+  try { drv = await BK.listDrive(); if (!settings.gConnected || !G.hasToken()) note = 'Para ver las de Drive, toca la nube y conecta con Google.'; } catch (e) { note = e.message; }
+  const mb = n => (n / 1048576).toFixed(1) + ' MB';
+  const el = h(`<div class="bklist"><h3>En esta tablet</h3><div class="list">${loc.map((x, i) => `<div class="li">${icon('download')}<span class="tx">${fmtDate(x.date)} ${fmtTime(x.date)}${x.name.includes('antes') ? ' · antes de restaurar' : ''}</span><div class="grow"></div><span class="sub">${mb(x.size)}</span><button class="btn sm ghost" data-l="${i}" data-a="get">Guardar archivo</button><button class="btn sm" data-l="${i}" data-a="res">Restaurar</button></div>`).join('') || '<div class="li sub">Aún no hay copias</div>'}</div>
+    <h3>En Google Drive</h3><div class="list">${drv.map((x, i) => `<div class="li">${icon('cloud')}<span class="tx">${esc(x.name.replace(/\.json$/, ''))}</span><div class="grow"></div><span class="sub">${mb(+x.size || 0)}</span><button class="btn sm" data-d="${i}" data-a="res">Restaurar</button></div>`).join('') || `<div class="li sub">${esc(note || 'Aún no hay copias')}</div>`}</div></div>`);
+  let close;
+  el.addEventListener('click', async e => {
+    const b = e.target.closest('[data-a]'); if (!b) return;
+    const L = b.dataset.l !== undefined ? loc[+b.dataset.l] : null;
+    if (b.dataset.a === 'get') return download(L.file, L.name);
+    close();
+    if (!await confirm('¿Restaurar esta copia?', 'Restaurar', 'Se reemplazarán TODOS los datos actuales por los de la copia. Antes se guarda una copia de lo que hay ahora.')) return;
+    const t = toast('Restaurando…', 180000);
+    try { await restoreFile(L ? L.file : await BK.fetchDrive(drv[+b.dataset.d].id)); } catch (err) { toast(err.message || 'No se pudo restaurar', 6000); } finally { t.remove(); }
+  });
+  modal('Copias de seguridad', el, [{ label: 'Cerrar', value: null }], { wide: true, mount: c => { close = c; } });
+}
 
 // ---------------- bloqueo con PIN ----------------
 const sha = async t => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('cuaderno:' + t)))].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -822,8 +994,12 @@ addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = 
     });
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(e => console.warn(e));
   }
+  try { if (await MS.finishSignIn()) toast('Conectado con Office 365'); } catch (e) { toast('Office 365: ' + e.message, 8000); }
   if (!location.hash) history.replaceState(null, '', '#/home');
   route();
   sync.refreshState(); paintCloud();
   if (settings.gConnected) { G.prepare().catch(() => {}); if (G.hasToken()) sync.syncNow(); }
+  BK.start();
+  const msTick = () => MS.refresh().then(ch => { if (ch && !editor && !document.querySelector('.modal-bg,.pop') && /#\/(home|agenda)/.test(location.hash)) route(); }).catch(e => console.warn('Office 365', e));
+  msTick(); setInterval(msTick, 10 * 60000);
 })();

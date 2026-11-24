@@ -1,6 +1,7 @@
 // Operaciones con cuadernos, páginas y copias de seguridad.
 import { db, uid } from './db.js';
 import { W, H } from './ink.js';
+import { settings } from './settings.js';
 import { fmtDate, fromKey, cap } from './ui.js';
 
 export function newPage(nbId, tpl = 'blanco', extra = {}) {
@@ -101,10 +102,17 @@ export async function exportAll() {
   return new Blob([JSON.stringify(out)], { type: 'application/json' });
 }
 
+// La copia no lleva claves: se conservan las de esta tablet.
+async function saveSettingsAfter() {
+  const r = await db.get('kv', 'settings');
+  if (r?.v && !r.v.aiKey && settings.aiKey) { r.v.aiKey = settings.aiKey; await db.put('kv', r); }
+}
+
 export async function importAll(file) {
   const o = JSON.parse(await file.text());
   if (o.app !== 'cuaderno') throw new Error('El archivo no es una copia de Cuaderno');
   for (const s of ['notebooks', 'pages', 'events', 'todos', 'kv']) { await db.clear(s); await db.putMany(s, o[s] || []); }
   await db.clear('blobs');
   for (const b of o.blobs || []) await db.put('blobs', { ...b, data: await (await fetch(b.data)).blob() });
+  await saveSettingsAfter();
 }
