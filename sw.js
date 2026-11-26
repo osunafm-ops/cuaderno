@@ -1,18 +1,18 @@
 // Service worker: la app funciona sin conexión una vez abierta la primera vez.
 // Con internet siempre carga la última versión publicada; sin internet usa la copia guardada.
 importScripts('js/backup-core.js');
-const V = 'cuaderno-v12';
+const V = 'cuaderno-v13';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/db.js', 'js/ui.js', 'js/icons.js', 'js/settings.js', 'js/store.js',
   'js/ink.js', 'js/templates.js', 'js/render.js', 'js/pdf.js', 'js/editor.js',
   'js/google.js', 'js/sync.js', 'js/ai.js', 'js/richtext.js', 'js/folders.js',
-  'js/checklist.js', 'js/backup.js', 'js/backup-core.js', 'js/ms.js',
+  'js/checklist.js', 'js/table.js', 'js/tasks.js', 'js/reading.js', 'js/backup.js', 'js/backup-core.js', 'js/ms.js',
   'icons/icon-192.png', 'icons/icon-512.png'
 ];
 const SHARE = 'cuaderno-compartir';
 // Solo se guardan copias de la propia app y de sus librerías; nunca de las APIs de Google.
-const CACHE_HOSTS = ['cdnjs.cloudflare.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
+const CACHE_HOSTS = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(V)

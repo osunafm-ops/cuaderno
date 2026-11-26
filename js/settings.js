@@ -16,8 +16,9 @@ export const settings = {
   eraserSize: 18,
   textSize: 36,
   defaultTpl: 'rayas',
-  pens: [{ b: 'pluma', w: 2.5, c: '#141414' }, { b: 'fino', w: 1.5, c: '#141414' }],
+  pens: [{ b: 'pluma', w: 2.5, c: '#141414' }, { b: 'fino', w: 1.5, c: '#141414' }, { b: 'boli', w: 2.5, c: '#1565c0' }],
   hl: { w: 8, c: '#9a9a9a' },
+  hl2: { w: 8, c: '#ffd400' },
   // Sincronización con Google
   gClientId: '',
   gConnected: false,
@@ -44,6 +45,10 @@ export async function loadSettings() {
   try {
     const r = await db.get('kv', 'settings');
     if (r) Object.assign(settings, r.v);
+    // Ajustes guardados con versiones anteriores: 2 lápices y 1 fluorescente.
+    const def = [{ b: 'pluma', w: 2.5, c: '#141414' }, { b: 'fino', w: 1.5, c: '#141414' }, { b: 'boli', w: 2.5, c: '#1565c0' }];
+    while (settings.pens.length < 3) settings.pens.push(def[settings.pens.length]);
+    settings.hl2 = settings.hl2 || { w: 8, c: '#ffd400' };
   } catch (e) { console.warn(e); }
   applyTheme();
 }

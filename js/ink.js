@@ -1,6 +1,7 @@
 // Motor de tinta: pinceles, texto, imágenes, selección y reconocimiento de formas.
 import * as RT from './richtext.js';
 import * as CK from './checklist.js';
+import * as TB from './table.js';
 export const W = 1200, H = 1600; // tamaño lógico de la página (proporción 3:4)
 
 export const BRUSHES = [
@@ -91,6 +92,7 @@ export function drawObj(ctx, o, onload) {
   if (o.t === 's') return drawStroke(ctx, o);
   if (o.t === 'x') return drawText(ctx, o);
   if (o.t === 'c') return CK.draw(ctx, o);
+  if (o.t === 't') return TB.draw(ctx, o);
   if (o.t === 'i') {
     const im = IMG.get(o.src);
     if (im && im.complete && im.naturalWidth) ctx.drawImage(im, o.x, o.y, o.w, o.h);
@@ -145,13 +147,13 @@ export function scale(o, ox, oy, k) {
     o.w *= k;
   } else {
     o.x = ox + (o.x - ox) * k; o.y = oy + (o.y - oy) * k;
-    if (o.t === 'x') RT.scale(o, k); else { o.w *= k; o.h *= k; if (o.t === 'c') { o.size *= k; o.h = CK.layout(o).h; } }
+    if (o.t === 'x') RT.scale(o, k); else { o.w *= k; o.h *= k; if (o.t === 'c') { o.size *= k; o.h = CK.layout(o).h; } if (o.t === 't') { o.size *= k; o.h = TB.layout(o).h; } }
   }
 }
 
 export function restore(o, src) {
   BOX.delete(o);
-  for (const k in src) { const v = src[k]; o[k] = k === 'paras' || k === 'items' ? JSON.parse(JSON.stringify(v)) : Array.isArray(v) ? v.slice() : v; }
+  for (const k in src) { const v = src[k]; o[k] = k === 'paras' || k === 'items' || k === 'cells' ? JSON.parse(JSON.stringify(v)) : Array.isArray(v) ? v.slice() : v; }
 }
 
 export const clone = o => JSON.parse(JSON.stringify(o));

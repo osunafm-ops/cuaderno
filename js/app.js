@@ -15,16 +15,18 @@ import * as AI from './ai.js';
 import * as FD from './folders.js';
 import * as BK from './backup.js';
 import * as MS from './ms.js';
+import * as TK from './tasks.js';
+import * as RDG from './reading.js';
 
 const app = document.getElementById('app');
-let editor = null, panes = [], timer = null, installEvt = null;
+let editor = null, panes = [], reader = null, timer = null, installEvt = null;
 
 const NAV = [
-  ['home', 'Inicio', 'home'], ['papel', 'Cuadernos', 'notebook'], ['agenda', 'Agenda', 'calendar'],
-  ['reuniones', 'Reuniones', 'mic'], ['biblioteca', 'Biblioteca', 'library'], ['recortes', 'Recortes', 'picking'], ['notas', 'Notas', 'memo']
+  ['home', 'Inicio', 'home'], ['papel', 'Cuadernos', 'notebook'], ['agenda', 'Agenda', 'calendar'], ['tareas', 'Tareas', 'task'],
+  ['reuniones', 'Reuniones', 'mic'], ['biblioteca', 'Biblioteca', 'library'], ['lectura', 'Lectura', 'book'], ['recortes', 'Recortes', 'picking'], ['notas', 'Notas', 'memo']
 ];
-const KIND_ROUTE = { paper: 'papel', meeting: 'reuniones', book: 'biblioteca', picking: 'recortes', memo: 'notas', daily: 'agenda' };
-const KIND_NAME = { paper: 'Cuaderno', meeting: 'Reunión', book: 'Libro', picking: 'Recorte', memo: 'Nota', daily: 'Agenda' };
+const KIND_ROUTE = { paper: 'papel', meeting: 'reuniones', book: 'biblioteca', picking: 'recortes', memo: 'notas', daily: 'agenda', reading: 'lectura' };
+const KIND_NAME = { paper: 'Cuaderno', meeting: 'Reunión', book: 'Libro', picking: 'Recorte', memo: 'Nota', daily: 'Página del día', reading: 'Lectura' };
 
 app.innerHTML = `<div class="shell" id="main">
     <nav class="side">${NAV.map(([r, n, i]) => `<a href="#/${r}" data-r="${r}">${icon(i)}<span>${n}</span></a>`).join('')}
@@ -112,10 +114,10 @@ async function recentsMenu(anchor) {
   if (!nbs.length) return toast('Aún no hay recientes');
   menu(anchor, nbs.map(n => ({ icon: KIND_ICON[n.kind], label: `${n.title} · ${KIND_NAME[n.kind]}`, run: () => openNb(n) })), { side: 'below' });
 }
-const KIND_ICON = { paper: 'notebook', meeting: 'mic', book: 'library', picking: 'picking', memo: 'memo', daily: 'calendar' };
+const KIND_ICON = { paper: 'notebook', meeting: 'mic', book: 'library', picking: 'picking', memo: 'memo', daily: 'calendar', reading: 'book' };
 
 const go = hash => { if (location.hash === hash) route(); else location.hash = hash; };
-const openNb = (nb, page) => go(`#/ed/${nb.id}${page !== undefined ? '/' + page : ''}`);
+const openNb = (nb, page) => nb.kind === 'reading' ? RDG.open(nb, ctxR) : go(`#/ed/${nb.id}${page !== undefined ? '/' + page : ''}`);
 
 async function quickMemo() {
   const nb = await store.newNotebook('memo', 'Nota · ' + new Date().toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }), { tpl: 'rayas_f' });
@@ -128,12 +130,22 @@ async function doRoute() {
   closePop();
   document.querySelectorAll('.modal-bg').forEach(m => m.remove());
   const old = panes; panes = []; editor = null;
+  if (reader) { const x = reader; reader = null; await x.destroy(); }
   for (const e of old) await e.destroy();
   const [, r, a, b, c, d] = location.hash.split('/');
-  if (r !== 'ed') setZen(false);
+  if (r !== 'ed' && !(r === 'lectura' && a)) setZen(false);
+  if (r === 'lectura' && a) {
+    const b = await db.get('notebooks', a);
+    if (!b || b.kind !== 'reading') return go('#/lectura');
+    main.hidden = true; edroot.hidden = false; edroot.classList.remove('two');
+    const rd = await RDG.reader(edroot, b, ctxR);
+    if (location.hash.startsWith('#/lectura/' + a)) reader = rd; else await rd.destroy();
+    return;
+  }
   if (r === 'ed') {
     const nb = await db.get('notebooks', a);
     if (!nb) return go('#/home');
+    if (nb.kind === 'reading') return go('#/lectura/' + nb.id);
     main.hidden = true; edroot.hidden = false;
     const nb2 = c ? (c === a ? nb : await db.get('notebooks', c)) : null;
     edroot.innerHTML = ''; edroot.classList.toggle('two', !!nb2);
@@ -161,6 +173,8 @@ async function doRoute() {
 let routing = Promise.resolve();
 const route = () => (routing = routing.then(doRoute).catch(e => console.error(e)));
 addEventListener('hashchange', route);
+
+const ctxR = { route: () => route(), go: h => go(h), toggleFull: () => toggleFull(), importPdf: () => importPdf() };
 
 // ---------------- dos páginas a la vez y pantalla completa ----------------
 function setActive(e) {
@@ -200,7 +214,7 @@ async function pickPage(nb, done, cur) {
 
 async function pickNotebook(done) {
   const rec = await store.getRecent();
-  const list = (await db.all('notebooks')).filter(n => !FD.isFolder(n)).sort((a, b) => b.updated - a.updated);
+  const list = (await db.all('notebooks')).filter(n => !FD.isFolder(n) && n.kind !== 'reading').sort((a, b) => b.updated - a.updated);
   list.sort((a, b) => (rec.indexOf(a.id) + 1 || 99) - (rec.indexOf(b.id) + 1 || 99));
   const el = h(`<div><label class="search" style="margin-bottom:12px">${icon('search')}<input placeholder="Buscar cuaderno"></label><div class="list"></div></div>`);
   const box = el.querySelector('.list');
@@ -302,12 +316,15 @@ VIEWS.home = async v => {
   const tds = (await db.all('todos')).filter(t => t.date === today || (!t.done && t.date < today));
   const ext = sync.extOn(await extAll(), today);
   const count = k => nbs.filter(n => n.kind === k).length;
+  const tp = await TK.pendingCount();
   const stars = nbs.flatMap(n => (n.marks || []).filter(m => m.type === 'star' && n.pages.includes(m.pid)).map(m => ({ ...m, nb: n, pi: n.pages.indexOf(m.pid) }))).slice(-8).reverse();
   const tiles = [
     ['papel', 'notebook', 'Cuadernos', `${count('paper')} cuadernos`],
     ['agenda', 'calendar', 'Agenda', `${evs.length + ext.length} eventos hoy`],
+    ['tareas', 'task', 'Tareas', `${tp.n} pendientes${tp.late ? ' · ' + tp.late + ' atrasadas' : ''}`],
     ['reuniones', 'mic', 'Reuniones', `${count('meeting')} reuniones`],
     ['biblioteca', 'library', 'Biblioteca', `${count('book')} documentos`],
+    ['lectura', 'book', 'Lectura', `${nbs.filter(n => n.kind === 'reading' && n.status === 'leyendo').length} leyendo`],
     ['recortes', 'picking', 'Recortes', `${count('picking')} recortes`],
     ['notas', 'memo', 'Notas rápidas', `${count('memo')} notas`]
   ];
@@ -327,7 +344,7 @@ VIEWS.home = async v => {
   bindCovers(v.querySelector('.rc') || h('<div></div>'), recent, () => route());
   v.querySelectorAll('.stars [data-nb]').forEach(r => r.onclick = () => go(`#/ed/${r.dataset.nb}/${r.dataset.pi}`));
   v.querySelectorAll('[data-td] .chk').forEach(b => b.onclick = async () => {
-    const t = tds.find(x => x.id === b.closest('[data-td]').dataset.td); t.done = !t.done; await db.put('todos', t); route();
+    const t = tds.find(x => x.id === b.closest('[data-td]').dataset.td); await TK.setDone(t); route();
   });
   const clk = v.querySelector('.clock');
   timer = setInterval(() => { clk.textContent = fmtTime(new Date()); }, 15000);
@@ -336,15 +353,17 @@ VIEWS.home = async v => {
 
 // ---- Cuadernos: explorador de carpetas en árbol ----
 const F = { tag: '', q: '', sort: 'updated', open: new Set() };
-const inFolders = n => !FD.isFolder(n) && n.kind !== 'daily';
+const inFolders = n => !FD.isFolder(n) && n.kind !== 'daily' && n.kind !== 'reading';
+const DAYS = 'dias'; // carpeta fija con las páginas del día de la Agenda
 
 VIEWS.papel = async (v, cur = '') => {
   await FD.migrate();
   const allNb = await db.all('notebooks');
   const folders = allNb.filter(FD.isFolder);
-  if (cur && !folders.find(f => f.id === cur)) cur = '';
-  const docs = allNb.filter(inFolders);
-  const path = FD.pathOf(cur, folders);
+  if (cur && cur !== DAYS && !folders.find(f => f.id === cur)) cur = '';
+  const docs = allNb.filter(inFolders), days = allNb.filter(n => n.kind === 'daily').sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const inDays = cur === DAYS;
+  const path = inDays ? [] : FD.pathOf(cur, folders);
   path.forEach(f => F.open.add(f.id));
   const count = id => folders.filter(f => (f.parent || '') === id).length + docs.filter(d => (d.parent || '') === id).length;
   const sorter = (a, b) => F.sort === 'name' ? a.title.localeCompare(b.title, 'es', { numeric: true }) : F.sort === 'created' ? b.created - a.created : b.updated - a.updated;
@@ -352,7 +371,7 @@ VIEWS.papel = async (v, cur = '') => {
   const q = F.q.trim().toLowerCase();
   // En la raíz se ven los cuadernos; en cada carpeta, todo lo que se haya movido a ella.
   const here = d => (d.parent || '') === cur && (cur || d.kind === 'paper');
-  let subf = q ? folders.filter(f => f.title.toLowerCase().includes(q)) : FD.childrenOf(cur, folders);
+  let subf = q ? folders.filter(f => f.title.toLowerCase().includes(q)) : inDays ? [] : FD.childrenOf(cur, folders);
   const hit = d => d.title.toLowerCase().includes(q) || Object.values(d.txt || {}).some(t => t.toLowerCase().includes(q));
   const snippet = d => {
     if (d.title.toLowerCase().includes(q)) return '';
@@ -362,10 +381,11 @@ VIEWS.papel = async (v, cur = '') => {
     }
     return '';
   };
-  let list = docs.filter(d => (q ? hit(d) : here(d)) && (!F.tag || (d.tags || []).includes(F.tag)));
-  list.sort(sorter);
+  let list = q ? [...docs, ...days].filter(d => hit(d) && (!F.tag || (d.tags || []).includes(F.tag))) : inDays ? days : docs.filter(d => here(d) && (!F.tag || (d.tags || []).includes(F.tag)));
+  if (!inDays || q) list.sort(sorter);
+  const dayCard = !cur && !q && days.length ? `<div class="fcard" data-folder="${DAYS}">${icon('calendar')}<div class="ft"><b>Páginas del día</b><span class="sub">${days.length} páginas · la última ${esc(days[0].title)}</span></div></div>` : '';
   if (F.sort !== 'name') subf = [...subf].sort(sorter);
-  const where = d => { const p = FD.pathOf(d.parent || '', folders); return p.length ? p.map(f => f.title).join(' › ') : 'Raíz'; };
+  const where = d => { if (d.kind === 'daily') return 'Páginas del día'; const p = FD.pathOf(d.parent || '', folders); return p.length ? p.map(f => f.title).join(' › ') : 'Raíz'; };
 
   const tree = (pid, depth) => FD.childrenOf(pid, folders).map(f => {
     const kids = FD.childrenOf(f.id, folders).length, open = F.open.has(f.id);
@@ -377,19 +397,20 @@ VIEWS.papel = async (v, cur = '') => {
 
   v.innerHTML = `<div class="explorer">
     <aside class="ftree"><div class="trow root ${!cur ? 'on' : ''}"><a href="#/papel">${icon('home')}<span>Raíz</span></a><span class="tc">${count('') || ''}</span></div>
+      ${days.length ? `<div class="trow ${inDays ? 'on' : ''}" style="padding-left:22px"><span class="tcaret"></span><a href="#/papel/${DAYS}">${icon('calendar')}<span>Páginas del día</span></a><span class="tc">${days.length}</span></div>` : ''}
       ${tree('', 1)}<button class="btn sm ghost tnew">${icon('folderPlus')} Nueva carpeta</button></aside>
     <section class="fmain">
-      <div class="row head"><h1>${cur ? esc(path[path.length - 1].title) : 'Cuadernos'}</h1><div class="grow"></div>
+      <div class="row head"><h1>${inDays ? 'Páginas del día' : cur ? esc(path[path.length - 1].title) : 'Cuadernos'}</h1><div class="grow"></div>
         <label class="search">${icon('search')}<input placeholder="Buscar (también lo escrito)" value="${esc(F.q)}"></label>
         <div class="seg sort"><button data-s="updated">Recientes</button><button data-s="created">Creación</button><button data-s="name">A–Z</button></div></div>
-      <div class="row crumbs"><a href="#/papel" class="${!cur ? 'on' : ''}">${icon('home', 'inl')} Raíz</a>${path.map(f => `<span>›</span><a href="#/papel/${f.id}" class="${f.id === cur ? 'on' : ''}">${esc(f.title)}</a>`).join('')}
-        ${cur ? `<button class="ib cmore" title="Opciones de la carpeta">${icon('more')}</button>` : ''}<div class="grow"></div>
-        <button class="btn ghost nf">${icon('folderPlus')} Nueva carpeta</button><button class="btn pri new">${icon('plus')} Nuevo cuaderno</button></div>
+      <div class="row crumbs"><a href="#/papel" class="${!cur ? 'on' : ''}">${icon('home', 'inl')} Raíz</a>${inDays ? `<span>›</span><a href="#/papel/${DAYS}" class="on">Páginas del día</a>` : ''}${path.map(f => `<span>›</span><a href="#/papel/${f.id}" class="${f.id === cur ? 'on' : ''}">${esc(f.title)}</a>`).join('')}
+        ${cur && !inDays ? `<button class="ib cmore" title="Opciones de la carpeta">${icon('more')}</button>` : ''}<div class="grow"></div>
+        ${inDays ? '' : `<button class="btn ghost nf">${icon('folderPlus')} Nueva carpeta</button>`}<button class="btn pri new">${icon('plus')} ${inDays ? 'Página de hoy' : 'Nuevo cuaderno'}</button></div>
       ${tags.length ? `<div class="row chips">${icon('tag')}<button class="chip ${!F.tag ? 'on' : ''}" data-g="">Todas</button>${tags.map(t => `<button class="chip ${F.tag === t ? 'on' : ''}" data-g="${esc(t)}">${esc(t)}</button>`).join('')}</div>` : ''}
       ${q ? `<p class="sub">Resultados para «${esc(F.q)}» en todas las carpetas</p>` : ''}
-      ${subf.length ? `<div class="fcards">${subf.map(f => `<div class="fcard" data-folder="${f.id}">${icon('folder')}<div class="ft"><b>${esc(f.title)}</b><span class="sub">${q ? esc(where(f)) : count(f.id) + ' elementos'}</span></div><button class="ib" data-fmore="${f.id}" title="Opciones">${icon('more')}</button></div>`).join('')}</div>` : ''}
-      ${list.length ? `<div class="covers">${list.map(n => cover(n, q ? (snippet(n) || where(n)) : `${n.kind === 'paper' ? n.pages.length + ' pág.' : KIND_NAME[n.kind]} · ${fmtDate(n.updated)}`)).join('')}</div>`
-        : !subf.length ? empty(q ? 'search' : 'folder', q ? 'Nada coincide' : cur ? 'Carpeta vacía' : 'Aún no tienes cuadernos', q ? 'Prueba con otra palabra.' : 'Crea un cuaderno o una carpeta, o mueve aquí cualquier documento con su menú ⋯ → «Mover a carpeta».') : ''}
+      ${subf.length || dayCard ? `<div class="fcards">${dayCard}${subf.map(f => `<div class="fcard" data-folder="${f.id}">${icon('folder')}<div class="ft"><b>${esc(f.title)}</b><span class="sub">${q ? esc(where(f)) : count(f.id) + ' elementos'}</span></div><button class="ib" data-fmore="${f.id}" title="Opciones">${icon('more')}</button></div>`).join('')}</div>` : ''}
+      ${list.length ? `<div class="covers">${list.map(n => cover(n, q ? (snippet(n) || where(n)) : inDays ? `${n.pages.length} pág. · ${fmtDate(n.updated)}` : `${n.kind === 'paper' ? n.pages.length + ' pág.' : KIND_NAME[n.kind]} · ${fmtDate(n.updated)}`)).join('')}</div>`
+        : !subf.length && !dayCard ? empty(q ? 'search' : 'folder', q ? 'Nada coincide' : cur ? 'Carpeta vacía' : 'Aún no tienes cuadernos', q ? 'Prueba con otra palabra.' : 'Crea un cuaderno o una carpeta, o mueve aquí cualquier documento con su menú ⋯ → «Mover a carpeta».') : ''}
     </section></div>`;
 
   const refresh = () => route();
@@ -403,9 +424,9 @@ VIEWS.papel = async (v, cur = '') => {
     const r = await prompt('Nueva carpeta', [{ name: 't', label: cur ? `Dentro de «${path[path.length - 1].title}»` : 'En la raíz', value: '' }], 'Crear');
     if (r && r.t.trim()) { await FD.newFolder(r.t.trim(), cur); F.open.add(cur); route(); }
   };
-  v.querySelector('.nf').onclick = newF;
+  v.querySelector('.nf')?.addEventListener('click', newF);
   v.querySelector('.tnew').onclick = newF;
-  v.querySelector('.new').onclick = () => newNotebookDialog(cur);
+  v.querySelector('.new').onclick = async () => inDays ? openNb(await store.dailyNotebook(dkey())) : newNotebookDialog(cur);
   v.querySelector('.cmore')?.addEventListener('click', e => folderMenu(e.currentTarget, path[path.length - 1], refresh));
   const fc = v.querySelector('.fcards');
   if (fc) fc.addEventListener('click', e => {
@@ -580,7 +601,7 @@ VIEWS.agenda = async (v, a) => {
   const openDay = k => { CAL.sel = k; CAL.view = 'day'; route(); };
   v.firstElementChild.addEventListener('click', e => {
     const chk = e.target.closest('[data-chk]');
-    if (chk) { const t = REG[+chk.dataset.chk].ref; t.done = !t.done; db.put('todos', t).then(route); return; }
+    if (chk) { TK.setDone(REG[+chk.dataset.chk].ref).then(route); return; }
     const it = e.target.closest('[data-i]');
     if (it) { e.stopPropagation(); agendaItem(REG[+it.dataset.i], it); return; }
     const day = e.target.closest('[data-day]');
@@ -615,7 +636,7 @@ async function newEvent(date, time) {
 }
 async function newTodo(date) {
   const r = await prompt('Nueva tarea', [{ name: 'text', label: 'Tarea', value: '' }, { name: 'date', label: 'Fecha', type: 'date', value: date }], 'Añadir');
-  if (r && r.text.trim()) { await db.put('todos', { id: uid(), date: r.date || date, text: r.text.trim(), done: false }); route(); }
+  if (r && r.text.trim()) { await db.put('todos', TK.make({ date: r.date || date, text: r.text.trim(), origin: 'Creada en la Agenda' })); route(); }
 }
 
 async function openSrc(src) {
@@ -638,13 +659,10 @@ function agendaItem(it, anchor) {
   }
   if (it.kind === 'todo') {
     menu(anchor, [
-      { icon: 'check', label: ref.done ? 'Marcar como pendiente' : 'Marcar como hecha', run: async () => { ref.done = !ref.done; await db.put('todos', ref); route(); } },
+      { icon: 'check', label: ref.done ? 'Marcar como pendiente' : 'Marcar como hecha', run: async () => { await TK.setDone(ref); route(); } },
       ref.img && { icon: 'image', label: 'Ver lo escrito', run: () => modal(ref.text || 'Tarea', `<img src="${ref.img}" style="max-width:100%;background:#fff;border-radius:8px">`) },
       ref.src && { icon: 'notebook', label: 'Abrir en el cuaderno', run: () => openSrc(ref.src) },
-      { icon: 'pen2', label: 'Editar', run: async () => {
-        const r = await prompt('Editar tarea', [{ name: 'text', label: 'Tarea', value: ref.text || '' }, { name: 'date', label: 'Fecha', type: 'date', value: ref.date }], 'Guardar');
-        if (r && r.date) { Object.assign(ref, { date: r.date, text: r.text.trim() }); await db.put('todos', ref); route(); }
-      } },
+      { icon: 'pen2', label: 'Ficha y seguimiento', run: async () => { if (await TK.editTask(ref, openSrc)) route(); } },
       { icon: 'trash', label: 'Eliminar', danger: true, run: async () => { if (await confirm('¿Eliminar esta tarea?', 'Eliminar')) { await db.del('todos', ref.id); route(); } } }
     ]);
     return;
@@ -770,6 +788,10 @@ VIEWS.compartir = async v => {
   });
 };
 
+// ---- Tareas y Lectura ----
+VIEWS.tareas = v => TK.view(v, { route, openSrc, go });
+VIEWS.lectura = v => RDG.shelf(v, ctxR);
+
 // ---- Notas rápidas ----
 VIEWS.notas = async v => {
   const list = (await db.all('notebooks')).filter(n => n.kind === 'memo').sort((a, b) => b.updated - a.updated);
@@ -821,7 +843,6 @@ VIEWS.ajustes = async v => {
     <h2>Pantalla</h2>
     ${seg('tone', 'Tono del papel', 'Color del fondo de las páginas.', [['eink', 'Tinta electrónica'], ['white', 'Blanco'], ['cream', 'Crema']])}
     ${tog('dark', 'Modo oscuro', 'Invierte los colores para leer de noche.')}
-    ${tog('color', 'Tinta en color', 'Añade colores a los lápices (la tableta original solo tiene grises).')}
     ${seg('refresh', 'Efecto de refresco', '«Tinta» simula el parpadeo de una pantalla E Ink al cambiar de página.', [['fast', 'Rápido'], ['best', 'Tinta']])}
     <h2>Sincronización con Google</h2>
     <div class="set"><div class="tx">Estado<small>${settings.gConnected

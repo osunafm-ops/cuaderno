@@ -12,6 +12,8 @@ import * as AI from './ai.js';
 import * as RT from './richtext.js';
 import * as FD from './folders.js';
 import * as CK from './checklist.js';
+import * as TB from './table.js';
+import * as TK from './tasks.js';
 import { pageArea } from './render.js';
 
 let CLIP = null;
@@ -51,12 +53,13 @@ export class Editor {
         <button data-a="exit" title="Salir">${icon('back')}</button><hr>
         <button data-t="pen0" title="Lápiz 1 (pulsa otra vez para ajustar)">${icon('pen')}<span class="dot"></span></button>
         <button data-t="pen1" title="Lápiz 2 (pulsa otra vez para ajustar)">${icon('pen2')}<span class="dot"></span></button>
-        <button data-t="hl" title="Fluorescente">${icon('hl')}</button>
+        <button data-t="pen2" title="Lápiz 3 (pulsa otra vez para ajustar)">${icon('pen')}<span class="dot"></span></button>
+        <button data-t="hl" title="Fluorescente 1 (pulsa otra vez para ajustar)">${icon('hl')}<span class="dot"></span></button>
+        <button data-t="hl2" title="Fluorescente 2 (pulsa otra vez para ajustar)">${icon('hl2')}<span class="dot"></span></button>
         <button data-t="eraser" title="Borrador">${icon('eraser')}</button>
         <button data-t="lasso" title="Lazo">${icon('lasso')}</button>
         <button data-t="text" title="Texto">${icon('text')}</button>
-        <button data-a="image" title="Insertar foto o imagen">${icon('image')}</button>
-        <button data-a="check" title="Lista con casillas">${icon('checks')}</button>
+        <button data-a="ins" title="Insertar: foto, lista con casillas o tabla">${icon('insert')}</button>
         <button data-a="ai" title="Gemini (IA)">${icon('spark')}</button><hr>
         <button data-a="undo" title="Deshacer">${icon('undo')}</button>
         <button data-a="redo" title="Rehacer">${icon('redo')}</button><hr>
@@ -386,7 +389,7 @@ export class Editor {
   pickTool(t, btn) {
     if (this.editingText) this.editingText();
     if (this.tool === t) {
-      if (t === 'pen0' || t === 'pen1' || t === 'hl') this.penPop(t, btn);
+      if (/^(pen\d|hl2?)$/.test(t)) this.penPop(t, btn);
       else if (t === 'eraser') this.eraserPop(btn);
       else if (t === 'text') this.textPop(btn);
       return;
@@ -398,24 +401,26 @@ export class Editor {
 
   updTools() {
     this.el.querySelectorAll('.tb [data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === this.tool));
-    this.el.querySelectorAll('.tb [data-t^=pen]').forEach(b => {
-      const cfg = settings.pens[+b.dataset.t.slice(3)];
-      b.querySelector('.dot').style.cssText = `background:${cfg.c};height:${Math.min(6, 1 + cfg.w)}px`;
+    this.el.querySelectorAll('.tb [data-t^=pen], .tb [data-t^=hl]').forEach(b => {
+      const cfg = this.cfgOf(b.dataset.t), hl = b.dataset.t.startsWith('hl');
+      b.querySelector('.dot').style.cssText = `background:${cfg.c};height:${hl ? 5 : Math.min(6, 1 + cfg.w)}px;${hl ? 'opacity:.7' : ''}`;
     });
   }
+  cfgOf(t) { return t === 'hl' ? settings.hl : t === 'hl2' ? settings.hl2 : settings.pens[+t.slice(3)] || settings.pens[0]; }
 
   penPop(t, btn) {
-    const isHl = t === 'hl';
-    const cfg = isHl ? settings.hl : settings.pens[+t.slice(3)];
+    const isHl = t.startsWith('hl');
+    const cfg = this.cfgOf(t);
     const el = h('<div class="penpop"></div>');
     const draw = () => {
-      const colors = isHl ? (settings.color ? [...HL_GRAYS, ...HL_COLORS] : HL_GRAYS) : (settings.color ? [...GRAYS, ...COLORS] : GRAYS);
-      el.innerHTML = `<div class="pop-t">${isHl ? 'Fluorescente' : 'Lápiz ' + (+t.slice(3) + 1)}</div>
+      const colors = isHl ? [...HL_GRAYS, ...HL_COLORS] : [...GRAYS, ...COLORS, '#00838f', '#ad1457', '#6d4c41'];
+      el.innerHTML = `<div class="pop-t">${isHl ? 'Fluorescente ' + (t === 'hl2' ? 2 : 1) : 'Lápiz ' + (+t.slice(3) + 1)}</div>
         ${isHl ? '' : `<div class="brushes">${BRUSHES.map(([id, n]) => `<button class="chip ${cfg.b === id ? 'on' : ''}" data-b="${id}">${n}</button>`).join('')}</div>`}
         <div class="lbl">Grosor</div>
         <div class="row">${WIDTHS.map(w => { const v = isHl ? w * 3 : w; return `<button class="wd ${Math.abs(cfg.w - (isHl ? w * 3 : w)) < 0.01 ? 'on' : ''}" data-w="${v}"><i style="width:${Math.min(26, 3 + v * (isHl ? 0.9 : 3))}px;height:${Math.min(26, 3 + v * (isHl ? 0.9 : 3))}px"></i></button>`; }).join('')}</div>
         <div class="lbl">Color</div>
-        <div class="row">${colors.map(c => `<button class="sw ${cfg.c === c ? 'on' : ''}" data-c="${c}" style="background:${c}"></button>`).join('')}</div>
+        <div class="row" style="flex-wrap:wrap">${colors.map(c => `<button class="sw ${cfg.c === c ? 'on' : ''}" data-c="${c}" style="background:${c}"></button>`).join('')}
+          <label class="sw cpick ${colors.includes(cfg.c) ? '' : 'on'}" title="Otro color" style="background:${colors.includes(cfg.c) ? 'conic-gradient(red,yellow,lime,cyan,blue,magenta,red)' : cfg.c}"><input type="color" value="${cfg.c}"></label></div>
         <canvas class="pv" width="560" height="110"></canvas>`;
       const cv = el.querySelector('.pv'), x = cv.getContext('2d');
       x.fillStyle = '#fbfaf6'; x.fillRect(0, 0, 560, 110); x.scale(2, 2);
@@ -430,6 +435,7 @@ export class Editor {
       if (b.dataset.c) cfg.c = b.dataset.c;
       saveSettings(); this.updTools(); draw();
     };
+    el.addEventListener('change', e => { if (e.target.type === 'color') { cfg.c = e.target.value; saveSettings(); this.updTools(); draw(); } });
     draw();
     pop(btn, el, { side: this.side() });
   }
@@ -514,7 +520,12 @@ export class Editor {
     await db.put('pages', p);
     this.nb.updated = p.updated;
     // Texto de la página para el buscador: lo tecleado + lo reconocido de la escritura (si se pidió).
-    const typed = p.layers.flatMap(L => L.objs).filter(o => o.t === 'x' || o.t === 'c').map(o => o.t === 'c' ? CK.text(o) : o.text || RT.plain(o)).join(' ');
+    const typed = p.layers.flatMap(L => L.objs).filter(o => o.t === 'x' || o.t === 'c' || o.t === 't').map(o => o.t === 'c' ? CK.text(o) : o.t === 't' ? TB.text(o) : o.text || RT.plain(o)).join(' ');
+    // Casillas de las listas: se recogen para el apartado Tareas.
+    const cks = [];
+    for (const L of p.layers) for (const o of L.objs) if (o.t === 'c') { o.id = o.id || uid(); o.items.forEach((it, i) => cks.push({ pid: p.id, oid: o.id, i, text: it.text || '', done: !!it.done, title: o.title || '' })); }
+    this.nb.cks = (this.nb.cks || []).filter(c => c.pid !== p.id).concat(cks);
+    if (!this.nb.cks.length) delete this.nb.cks;
     this.nb.txt = { ...(this.nb.txt || {}), [p.id]: (typed + ' ' + (p.ocr || '') + ' ' + (p.marks || []).map(m => m.label || '').join(' ')).trim() };
     this.nb.marks = (this.nb.marks || []).filter(m => m.pid !== p.id).concat((p.marks || []).map(m => ({ ...m, pid: p.id })));
     if (this.idx === 0 || !this.nb.cover) this.nb.cover = p.thumb;
@@ -616,9 +627,9 @@ export class Editor {
     const p = this.pt(e), tool = this.effTool(e), id = e.pointerId, touch = e.pointerType === 'touch';
     if (this.isLocked() && tool !== 'lasso') { toast('Página bloqueada · desbloquéala en ⋯'); return; }
     switch (tool) {
-      case 'pen0': case 'pen1': case 'hl': {
-        const cfg = tool === 'hl' ? settings.hl : settings.pens[+tool.slice(3)];
-        const s = { t: 's', b: tool === 'hl' ? 'marca' : cfg.b, w: cfg.w, c: cfg.c, pts: [p.x, p.y, p.p] };
+      case 'pen0': case 'pen1': case 'pen2': case 'hl': case 'hl2': {
+        const cfg = this.cfgOf(tool);
+        const s = { t: 's', b: tool.startsWith('hl') ? 'marca' : cfg.b, w: cfg.w, c: cfg.c, pts: [p.x, p.y, p.p] };
         this.act = { id, touch, kind: 'draw', s, t0: performance.now(), wall: Date.now(), check: this.checkAt(p) };
         this.armHold(p);
         this.reqLive();
@@ -778,7 +789,7 @@ export class Editor {
       <button data-s="dup">${icon('dup')}Duplicar</button><button data-s="del">${icon('trash')}Borrar</button>
       <button data-s="layer">${icon('moveLayer')}Capa</button><button data-s="event">${icon('event')}Evento</button>
       <button data-s="todo">${icon('task')}Tarea</button><button data-s="head">${icon('listN')}Índice</button><button data-s="star">${icon('star')}Destacar</button>
-      ${this.sel.objs.length === 1 && this.sel.objs[0].t === 'c' ? `<button data-s="editck">${icon('checks')}Editar</button>` : ''}${this.sel.objs.some(o => o.ar) ? `<button data-s="listen">${icon('headphones')}Escuchar</button>` : ''}<button data-s="pick">${icon('picking')}Recorte</button></div>`);
+      ${this.sel.objs.length === 1 && this.sel.objs[0].t === 'c' ? `<button data-s="editck">${icon('checks')}Editar</button>` : ''}${this.sel.objs.length === 1 && this.sel.objs[0].t === 't' ? `<button data-s="edittb">${icon('table')}Editar</button>` : ''}${this.sel.objs.some(o => o.ar) ? `<button data-s="listen">${icon('headphones')}Escuchar</button>` : ''}<button data-s="pick">${icon('picking')}Recorte</button></div>`);
     this.ovl.append(bar);
     const inf = this.page.inf, bx = (b.x - this.X0) * z, by = (b.y - this.Y0) * z;
     if (inf) bar.style.maxWidth = Math.min(700, this.sc.clientWidth - 16) + 'px';
@@ -853,11 +864,12 @@ export class Editor {
         if (!r || !r.date) return;
         const src = { nb: this.nb.id, pid: this.page.id };
         if (a === 'event') await db.put('events', { id: uid(), date: r.date, time: r.time || '', title: r.title, img: img.src, src });
-        else await db.put('todos', { id: uid(), date: r.date, text: r.title, img: img.src, done: false, src });
+        else await db.put('todos', TK.make({ date: r.date, text: r.title, img: img.src, src, origin: 'Sacada de «' + this.nb.title + '» con el lazo' }));
         toast(a === 'event' ? 'Evento añadido a la Agenda' : 'Tarea añadida a la Agenda');
         break;
       }
       case 'editck': this.editCheck(objs[0]); break;
+      case 'edittb': this.editTable(objs[0]); break;
       case 'pick': await store.newPicking(this.selImage()); toast('Guardado en Recortes'); break;
       case 'head': case 'star': {
         const b = ink.unionBox(objs), img = this.selImage();
@@ -969,7 +981,7 @@ export class Editor {
     let n = 0;
     for (const c of el.querySelectorAll('input:checked')) {
       if (c.dataset.e !== undefined) { const e = evs[+c.dataset.e]; await db.put('events', { id: uid(), date: e.fecha, time: /^\d{2}:\d{2}$/.test(e.hora || '') ? e.hora : '', title: e.titulo }); }
-      else { const t = tds[+c.dataset.t]; await db.put('todos', { id: uid(), date: t.fecha, text: t.texto, done: false }); }
+      else { const t = tds[+c.dataset.t]; await db.put('todos', TK.make({ date: t.fecha, text: t.texto, src: { nb: this.nb.id, pid: this.page.id }, origin: 'Sacada por Gemini de «' + this.nb.title + '»' })); }
       n++;
     }
     toast(`${n} elementos añadidos a la Agenda`);
@@ -1052,6 +1064,8 @@ export class Editor {
       if (c) { this.toggleCheck(c); return; }
       const l = this.page.layers.filter(L => L.vis).flatMap(L => L.objs).find(o => o.t === 'c' && p.x >= o.x && p.x <= o.x + o.w && p.y >= o.y && p.y <= o.y + o.h);
       if (l) { this.editCheck(l); return; }
+      const tb = [...this.page.layers].reverse().filter(L => L.vis).flatMap(L => [...L.objs].reverse()).find(o => o.t === 't' && TB.cellAt(o, p));
+      if (tb) { this.editTable(tb, TB.cellAt(tb, p)); return; }
     }
     this.snap();
     let o = hit;
@@ -1275,6 +1289,52 @@ export class Editor {
     this.renderInk(); this.select(objs); this.dirty();
   }
 
+  insertMenu(btn) {
+    if (this.isLocked()) return toast('Página bloqueada');
+    menu(btn, [
+      { icon: 'image', label: 'Elegir foto (galería y Google Fotos)', run: () => this.insertImages() },
+      { icon: 'camera', label: 'Hacer una foto', run: () => this.takePhoto() },
+      { icon: 'share', label: 'Traer de Google Fotos (Compartir)', run: () => this.photosHelp() },
+      { icon: 'paste', label: 'Pegar imagen copiada', run: () => this.pasteImage() },
+      { icon: 'checks', label: 'Lista con casillas', run: () => this.newCheck() },
+      { icon: 'table', label: 'Tabla (filas y columnas)', run: () => this.newTable() }
+    ], { side: this.side() });
+  }
+
+  // Primera altura libre debajo de lo que ya hay en la página (para no tapar nada al insertar).
+  freeY() {
+    const objs = this.page.layers.filter(L => L.vis).flatMap(L => L.objs);
+    if (!objs.length) return 140;
+    const b = ink.unionBox(objs), y = b.y + b.h + 50;
+    return y < H - 300 ? Math.max(140, y) : 140;
+  }
+
+  // ---------------- tablas ----------------
+  async newTable() {
+    const rc = await TB.ask(); if (!rc) return;
+    const c = this.center(), at = this.page.inf ? { x: c.x - 450, y: c.y - 200 } : { x: 100, y: this.freeY() };
+    const o = TB.make(rc[0], rc[1], at, Math.max(20, Math.min(32, settings.textSize * 0.75)));
+    if (!this.page.inf) o.w = Math.min(o.w, W - 200);
+    const r = await TB.edit(o); if (!r) return;
+    this.snap();
+    Object.assign(o, r); o.h = TB.layout(o).h;
+    this.layer().objs.push(o);
+    this.tool = 'lasso'; this.updTools();
+    this.renderInk(); this.select([o]); this.dirty();
+    toast('Tabla insertada: arrástrala o cambia su tamaño con el lazo. Con «Texto» toca una celda para editarla.', 4500);
+  }
+  async editTable(o, cell) {
+    if (this.isLocked()) return toast('Página bloqueada');
+    const r = await TB.edit(o, cell || [0, 0]); if (!r) return;
+    this.snap();
+    const k = o.w / Math.max(1, (o.cw || []).reduce((a, b) => a + b, 0) || o.cells[0].length);
+    const cols = r.cells[0].length;
+    Object.assign(o, r);
+    o.w = Math.max(200, Math.min(this.page.inf ? 6000 : W - o.x - 20, k * o.cw.slice(0, cols).reduce((a, b) => a + b, 0)));
+    o.h = TB.layout(o).h;
+    this.renderInk(); this.drawSel(); this.dirty();
+  }
+
   // ---------------- listas con casillas ----------------
   checkAt(p) {
     for (const L of [...this.page.layers].reverse()) if (L.vis) for (const o of L.objs) if (o.t === 'c') { const i = CK.boxAt(o, p); if (i >= 0) return { o, i }; }
@@ -1290,7 +1350,7 @@ export class Editor {
     const r = await CK.edit(null); if (!r) return;
     this.snap();
     const c = this.center(), size = Math.max(26, Math.min(44, settings.textSize));
-    const o = { t: 'c', x: this.page.inf ? c.x - 400 : 110, y: this.page.inf ? c.y - 200 : 140, w: 800, h: 0, size, c: settings.pens[0].c === '#ffffff' ? '#141414' : settings.pens[0].c, title: r.title, items: r.items };
+    const o = { t: 'c', id: uid(), x: this.page.inf ? c.x - 400 : 110, y: this.page.inf ? c.y - 200 : this.freeY(), w: 800, h: 0, size, c: settings.pens[0].c === '#ffffff' ? '#141414' : settings.pens[0].c, title: r.title, items: r.items };
     o.h = CK.layout(o).h;
     this.layer().objs.push(o);
     this.tool = 'lasso'; this.updTools();
@@ -1312,6 +1372,7 @@ export class Editor {
       case 'exit': if (this.opts.split) { this.opts.onClose(this); break; } history.length > 1 ? history.back() : (location.hash = '#/home'); break;
       case 'undo': this.doUndo(); break;
       case 'redo': this.doRedo(); break;
+      case 'ins': this.insertMenu(btn); break;
       case 'image': this.imageMenu(btn); break;
       case 'check': this.newCheck(); break;
       case 'split': this.opts.onSplit?.(this, btn); break;
