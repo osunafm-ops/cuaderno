@@ -25,6 +25,7 @@ App web instalable (PWA) que imita una tableta de tinta electrónica tipo VIWOOD
 - Google Fotos: la web no puede descargar de Google Fotos (sus servidores no lo permiten, comprobado 24/11/2026). Se usa el selector de Android y «Compartir» → Cuaderno (`share_target` del manifest, `#/compartir`).
 - v12 (24/11/2026): probada en el navegador del ordenador; falta publicarla y probarla en la tablet (compartir fotos, copia en Drive y con la app cerrada, Office 365).
 - v13 (26/11/2026): 3 lápices y 2 fluorescentes (`settings.pens[0..2]`, `settings.hl`, `settings.hl2`), botón «Insertar» (foto, lista, tabla). `js/table.js` — tablas tipo hoja de cálculo (objeto `t:'t'`, fórmulas =SUMA/PROMEDIO/MIN/MAX/CONTAR). `js/tasks.js` — apartado Tareas (`#/tareas`): fecha, estado, prioridad y seguimiento (`todo.log`); recoge las casillas de los cuadernos (`nb.cks`, se rellena al guardar cada página). `js/reading.js` — Lectura (`#/lectura`, `#/lectura/<id>`): libros `kind:'reading'` en `notebooks` (EPUB con epub.js de jsdelivr, PDF enlazado a la Biblioteca o en papel), buscador Open Library, subrayados, marcadores, búsqueda, temas, tiempo de lectura y meta anual. En Cuadernos, carpeta fija «Páginas del día» (`#/papel/dias`).
+- v14 (27/11/2026): barra de lápices fija, flotante (vertical u horizontal, se arrastra con el primer botón) u oculta con botón redondo movible (`settings.tbMode`, `tbDir`, `tbX/tbY`, `showX/showY`). Barra superior en una línea y solo iconos por debajo de 900 px (tablet en vertical).
 - `GUIA-GOOGLE.md` — pasos de registro en Google Cloud.
 
 ## Google

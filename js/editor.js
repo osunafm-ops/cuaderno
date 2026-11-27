@@ -50,6 +50,7 @@ export class Editor {
     this.root.innerHTML = '';
     this.el = h(`<div class="ed ${this.lh ? 'lh' : ''} ${this.opts.split ? 'mini' : ''}">
       <aside class="tb">
+        <button data-a="tbmode" class="grip" title="Barra fija, flotante u oculta (arrastra para moverla)">${icon('dock')}</button>
         <button data-a="exit" title="Salir">${icon('back')}</button><hr>
         <button data-t="pen0" title="Lápiz 1 (pulsa otra vez para ajustar)">${icon('pen')}<span class="dot"></span></button>
         <button data-t="pen1" title="Lápiz 2 (pulsa otra vez para ajustar)">${icon('pen2')}<span class="dot"></span></button>
@@ -84,6 +85,7 @@ export class Editor {
           <button class="ib" data-a="full" title="Pantalla completa">${icon('full')}</button>
         </header>
         <div class="scroller"><div class="sheet"><canvas class="c-bg"></canvas><canvas class="c-ink"></canvas><canvas class="c-live"></canvas><div class="ovl"></div></div></div>
+        <button class="tbshow" title="Mostrar la barra de lápices (arrástralo para moverlo)">${icon('pen')}</button>
         <div class="zenbar"><button class="ib" data-a="prev" title="Página anterior">${icon('left')}</button><span class="pgl2"></span><button class="ib" data-a="next" title="Página siguiente">${icon('right')}</button><button class="ib" data-a="full" title="Salir de pantalla completa">${icon('unfull')}</button></div>
       </section></div>`);
     this.root.append(this.el);
@@ -94,7 +96,7 @@ export class Editor {
     this.xBg = this.cBg.getContext('2d'); this.xInk = this.cInk.getContext('2d'); this.xLive = this.cLive.getContext('2d');
 
     q('.tb').addEventListener('click', e => {
-      const b = e.target.closest('button'); if (!b) return;
+      const b = e.target.closest('button'); if (!b || b.dataset.a === 'tbmode') return;
       if (b.dataset.t) this.pickTool(b.dataset.t, b); else this.action(b.dataset.a, b);
     });
     q('.ed-top').addEventListener('click', e => {
@@ -118,6 +120,7 @@ export class Editor {
     this.onKey = e => this.key(e);
     addEventListener('keydown', this.onKey);
     this.setupExtra();
+    this.setupTb();
     syncHooks.before = flushAll;
     // Cuando terminan de cargar las letras (negrita, cursiva, «a mano»…), redibujar los textos.
     this.onFonts = () => this.reqInk();
@@ -169,6 +172,7 @@ export class Editor {
     if (!LIVE.size) syncHooks.before = null;
     this.ro?.disconnect();
     removeEventListener('keydown', this.onKey);
+    removeEventListener('resize', this.onWin);
     if (this.editingText) this.editingText();
     if (this.mr) this.mr.stop();
     clearInterval(this.recT);
@@ -384,7 +388,97 @@ export class Editor {
   // ---------------- herramientas ----------------
   layer() { return this.page.layers[this.page.al] || this.page.layers[0]; }
   isLocked() { return !!this.page.locked; }
-  side() { return this.lh ? 'left' : 'right'; }
+  side() {
+    if (settings.tbMode === 'flota') {
+      if (settings.tbDir === 'h') return 'below';
+      const r = this.q('.tb').getBoundingClientRect(), e = this.el.getBoundingClientRect();
+      return r.left + r.width / 2 > e.left + e.width / 2 ? 'left' : 'right';
+    }
+    return this.lh ? 'left' : 'right';
+  }
+
+  // ---------------- barra de lápices: fija, flotante u oculta ----------------
+  setupTb() {
+    const tb = this.q('.tb'), show = this.q('.tbshow');
+    this.drag(this.q('.grip'), tb, 'tb', () => this.tbMenu(this.q('.grip')));
+    this.drag(show, show, 'show', () => this.setTbMode(settings.tbPrev && settings.tbPrev !== 'oculta' ? settings.tbPrev : 'fija'));
+    this.onWin = () => this.placeTb();
+    addEventListener('resize', this.onWin);
+    this.applyTb();
+  }
+
+  applyTb() {
+    const m = settings.tbMode || 'fija', el = this.el;
+    el.classList.toggle('tbf', m === 'flota');
+    el.classList.toggle('tbh', m === 'flota' && settings.tbDir === 'h');
+    el.classList.toggle('tbo', m === 'oculta');
+    this.q('.grip').innerHTML = icon(m === 'flota' ? 'float' : 'dock');
+    this.placeTb();
+    this.updShow();
+    requestAnimationFrame(() => this.fit());
+  }
+
+  updShow() {
+    const t = this.tool, ic = { pen0: 'pen', pen1: 'pen2', pen2: 'pen', hl: 'hl', hl2: 'hl2', eraser: 'eraser', lasso: 'lasso', text: 'text' }[t] || 'pen';
+    const s = this.q('.tbshow'); if (!s) return;
+    s.innerHTML = icon(ic) + (t.startsWith('pen') || t.startsWith('hl') ? `<i style="background:${this.cfgOf(t).c}"></i>` : '');
+  }
+
+  // Coloca la barra flotante y el botón de mostrar donde se dejaron (en proporción, para que valga al girar la tablet).
+  placeTb() {
+    const e = this.el; if (!e?.isConnected) return;
+    const W2 = e.clientWidth, H2 = e.clientHeight;
+    const put = (n, fx, fy) => { n.style.left = Math.round(Math.max(0, Math.min(1, fx)) * Math.max(0, W2 - n.offsetWidth)) + 'px'; n.style.top = Math.round(Math.max(0, Math.min(1, fy)) * Math.max(0, H2 - n.offsetHeight)) + 'px'; };
+    const tb = this.q('.tb');
+    if (settings.tbMode === 'flota') put(tb, settings.tbX, settings.tbY); else { tb.style.left = tb.style.top = ''; }
+    if (settings.tbMode === 'oculta') put(this.q('.tbshow'), settings.showX, settings.showY);
+  }
+
+  // Arrastrar con el dedo o el lápiz; un toque sin mover hace la acción.
+  drag(handle, target, key, tap) {
+    handle.addEventListener('pointerdown', e => {
+      e.preventDefault(); e.stopPropagation();
+      const movable = key === 'show' || settings.tbMode === 'flota';
+      const r0 = target.getBoundingClientRect(), er = this.el.getBoundingClientRect(), x0 = e.clientX, y0 = e.clientY;
+      let moved = false;
+      try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+      const mv = ev => {
+        if (!moved && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 8) return;
+        moved = true;
+        if (!movable) return;
+        const x = Math.max(0, Math.min(er.width - r0.width, r0.left - er.left + ev.clientX - x0));
+        const y = Math.max(0, Math.min(er.height - r0.height, r0.top - er.top + ev.clientY - y0));
+        target.style.left = x + 'px'; target.style.top = y + 'px';
+        settings[key === 'tb' ? 'tbX' : 'showX'] = er.width > r0.width ? x / (er.width - r0.width) : 0;
+        settings[key === 'tb' ? 'tbY' : 'showY'] = er.height > r0.height ? y / (er.height - r0.height) : 0;
+      };
+      const up = () => {
+        handle.removeEventListener('pointermove', mv); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up);
+        if (moved && movable) saveSettings(); else if (!moved) tap();
+      };
+      handle.addEventListener('pointermove', mv); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
+    });
+  }
+
+  setTbMode(m, dir) {
+    if (m === 'oculta' && settings.tbMode !== 'oculta') settings.tbPrev = settings.tbMode || 'fija';
+    settings.tbMode = m; if (dir) settings.tbDir = dir;
+    saveSettings();
+    for (const e of LIVE) e.applyTb();
+    if (m === 'oculta') toast('Barra oculta: toca el botón del lápiz para volver a verla. Puedes arrastrarlo.', 3500);
+    if (m === 'flota') toast('Para moverla, arrastra el primer botón de la barra', 3000);
+  }
+
+  tbMenu(btn) {
+    const m = settings.tbMode || 'fija', d = settings.tbDir;
+    menu(btn, [
+      m !== 'fija' && { icon: 'dock', label: 'Barra fija al lado', run: () => this.setTbMode('fija') },
+      !(m === 'flota' && d === 'v') && { icon: 'float', label: 'Barra flotante vertical', run: () => this.setTbMode('flota', 'v') },
+      !(m === 'flota' && d === 'h') && { icon: 'hbar', label: 'Barra flotante horizontal', run: () => this.setTbMode('flota', 'h') },
+      m === 'fija' && { icon: 'repeat', label: this.lh ? 'Pasar la barra a la izquierda' : 'Pasar la barra a la derecha', run: () => { settings.leftHanded = !settings.leftHanded; saveSettings(); this.lh = settings.leftHanded; this.el.classList.toggle('lh', this.lh); this.fit(); } },
+      { icon: 'eyeoff', label: 'Ocultar la barra', run: () => this.setTbMode('oculta') }
+    ], { side: this.side() });
+  }
 
   pickTool(t, btn) {
     if (this.editingText) this.editingText();
@@ -401,6 +495,7 @@ export class Editor {
 
   updTools() {
     this.el.querySelectorAll('.tb [data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === this.tool));
+    this.updShow?.();
     this.el.querySelectorAll('.tb [data-t^=pen], .tb [data-t^=hl]').forEach(b => {
       const cfg = this.cfgOf(b.dataset.t), hl = b.dataset.t.startsWith('hl');
       b.querySelector('.dot').style.cssText = `background:${cfg.c};height:${hl ? 5 : Math.min(6, 1 + cfg.w)}px;${hl ? 'opacity:.7' : ''}`;
@@ -1619,8 +1714,8 @@ export class Editor {
   // ---------------- reuniones: grabación de voz ----------------
   setupExtra() {
     const ex = this.q('.extra');
-    ex.innerHTML = `<button class="btn sm ghost" data-a="marks" title="Índice y destacados">${icon('listN')} Índice</button>
-      <button class="btn sm rec" data-a="rec" title="Grabar audio mientras escribes">${icon('rec')} Grabar</button><span class="rt sub"></span>
+    ex.innerHTML = `<button class="btn sm ghost" data-a="marks" title="Índice y destacados">${icon('listN')}<span class="tl"> Índice</span></button>
+      <button class="btn sm rec" data-a="rec" title="Grabar audio mientras escribes">${icon('rec')}<span class="tl"> Grabar</span></button><span class="rt sub"></span>
       <button class="btn sm ghost" data-a="recs" title="Grabaciones">${icon('headphones')} <span class="rc">${(this.nb.recs || []).length}</span></button>`;
   }
 
@@ -1641,13 +1736,13 @@ export class Editor {
       (nb.recs = nb.recs || []).push(id);
       await db.put('notebooks', nb);
       if (this.el.isConnected) {
-        btn.innerHTML = `${icon('rec')} Grabar`; btn.classList.remove('pri');
+        btn.innerHTML = `${icon('rec')}<span class="tl"> Grabar</span>`; btn.classList.remove('pri');
         this.q('.rt').textContent = ''; this.q('.rc').textContent = nb.recs.length;
       }
       toast('Grabación guardada');
     };
     mr.start(1000);
-    btn.innerHTML = `${icon('stop')} Parar`; btn.classList.add('pri');
+    btn.innerHTML = `${icon('stop')}<span class="tl"> Parar</span>`; btn.classList.add('pri');
     this.recT = setInterval(() => { this.q('.rt').textContent = '● ' + fmtDur(Date.now() - t0); }, 500);
   }
 

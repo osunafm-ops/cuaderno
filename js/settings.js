@@ -11,6 +11,9 @@ export const settings = {
   dark: false,
   refresh: 'fast',      // best (parpadeo E Ink) | fast
   leftHanded: false,
+  tbMode: 'fija',       // barra de lápices: fija | flota | oculta
+  tbDir: 'v',           // flotante: v (vertical) | h (horizontal)
+  tbPrev: 'fija', tbX: 0.03, tbY: 0.12, showX: 0.03, showY: 0.85,
   penButton: 'eraser',  // botón del S Pen: eraser | lasso | hl
   eraserMode: 'trazo',  // trazo | area
   eraserSize: 18,

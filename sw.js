@@ -1,7 +1,7 @@
 // Service worker: la app funciona sin conexión una vez abierta la primera vez.
 // Con internet siempre carga la última versión publicada; sin internet usa la copia guardada.
 importScripts('js/backup-core.js');
-const V = 'cuaderno-v13';
+const V = 'cuaderno-v14';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/db.js', 'js/ui.js', 'js/icons.js', 'js/settings.js', 'js/store.js',

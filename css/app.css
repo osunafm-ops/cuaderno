@@ -425,3 +425,32 @@ h3 { font-size: 15px; margin: 22px 0 8px; }
 .rset .row { flex-wrap: wrap; gap: 6px; }
 :root.zen .rtop, :root.zen .rbot { display: none; }
 :root.zen .rdr { grid-template-rows: 0 1fr 0; }
+
+/* Barra de lápices fija, flotante u oculta */
+.ed { position: relative; }
+.tb .grip { touch-action: none; cursor: grab; color: var(--mute); }
+.ed.tbf, .ed.tbo { grid-template-columns: 1fr; }
+.ed.tbf .ed-main, .ed.tbo .ed-main { grid-column: 1; }
+.ed.tbf .tb { position: absolute; z-index: 8; border: 1.5px solid var(--ink); border-radius: 14px; max-height: calc(100% - 12px); box-shadow: 0 4px 18px #0000002e; padding: 4px; }
+.ed.tbh .tb { flex-direction: row; flex-wrap: wrap; justify-content: center; max-width: calc(100% - 12px); max-height: none; overflow: visible; }
+.ed.tbh .tb hr { width: 0; height: 26px; border-top: 0; border-left: 1px solid var(--line2); margin: 0 3px; }
+.ed.tbh .tb button { width: 42px; }
+.ed.tbo .tb { display: none; }
+.tbshow { display: none; position: absolute; z-index: 8; width: 52px; height: 52px; border-radius: 50%; border: 1.5px solid var(--ink); background: var(--card); box-shadow: 0 4px 14px #00000033; place-items: center; touch-action: none; }
+.tbshow i { position: absolute; left: 16px; right: 16px; bottom: 9px; height: 4px; border-radius: 3px; }
+.ed.tbo .tbshow { display: grid; }
+:root.zen .ed.tbo .tbshow { display: grid; }
+/* Barra superior en vertical o pantallas estrechas: una sola línea, iconos sin texto */
+.ed-top { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.ed-top::-webkit-scrollbar { display: none; }
+.ed-top > * { flex: none; }
+.ed-top .extra { flex-wrap: nowrap; }
+.ed-top .grow { flex: 1 1 0; min-width: 4px; }
+@media (max-width: 900px) {
+  .ed-top { gap: 2px; padding: 4px 6px; }
+  .ed-top .tl, .ed-top [data-a=zout], .ed-top [data-a=zin], .ed-top .vsep { display: none; }
+  .ed-top .extra .btn { padding: 7px 9px; }
+  .ed-top .ttl { max-width: 24vw; font-size: 15px; }
+  .ed-top .zv, .ed-top .pgl { min-width: 44px; padding: 6px 4px; }
+}
+@media (max-width: 640px) { .ed-top .ttl { display: none; } .ed-top .zv { display: none; } }
